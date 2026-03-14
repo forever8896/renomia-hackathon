@@ -12,6 +12,21 @@ use normalizer::{is_vpp_document, normalize_ocr};
 
 const MAX_OCR_CHARS: usize = 800_000;
 
+fn mime_from_filename(filename: &str) -> String {
+    let lower = filename.to_lowercase();
+    if lower.ends_with(".pdf") {
+        "application/pdf".to_string()
+    } else if lower.ends_with(".docx") {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
+    } else if lower.ends_with(".doc") {
+        "application/msword".to_string()
+    } else if lower.ends_with(".xlsx") {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
 /// Find the largest index <= `pos` that is a valid char boundary.
 fn floor_char_boundary(s: &str, pos: usize) -> usize {
     if pos >= s.len() {
@@ -53,13 +68,17 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let rfp_text = rfp_text.clone();
 
             // Collect non-VPP PDF URLs for potential pass 2 (only actual PDFs, not .docx)
-            let pdf_urls: Vec<String> = offer
+            // Collect doc URLs + MIME types for potential PDF fallback (skip VPP)
+            let doc_urls: Vec<(String, String)> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
-                .filter(|doc| doc.filename.to_lowercase().ends_with(".pdf"))
-                .filter_map(|doc| doc.pdf_url.clone())
-                .filter(|url| !url.is_empty())
+                .filter_map(|doc| {
+                    let url = doc.pdf_url.clone()?;
+                    if url.is_empty() { return None; }
+                    let mime = mime_from_filename(&doc.filename);
+                    Some((url, mime))
+                })
                 .collect();
 
             // Build OCR text: primary docs + VPP if room
@@ -137,7 +156,7 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     )
                     .await;
 
-                (offer_id, insurer, extracted, pdf_urls, doc_text, rfp_text)
+                (offer_id, insurer, extracted, doc_urls, doc_text, rfp_text)
             }
         })
         .collect();
@@ -151,13 +170,13 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     let mut pdf_tasks = Vec::new();
     let mut no_pdf_results = Vec::new();
 
-    for (offer_id, insurer, fields_map, pdf_urls, doc_text, rfp_text) in pass1_results {
+    for (offer_id, insurer, fields_map, doc_urls, doc_text, rfp_text) in pass1_results {
         let missing_count = fields_map
             .values()
             .filter(|v| matches!(v.as_str(), "N/A" | "Neuvedeno"))
             .count();
 
-        if missing_count > 0 && !pdf_urls.is_empty() {
+        if missing_count > 0 && !doc_urls.is_empty() {
             let na_fields: Vec<String> = fields_map
                 .iter()
                 .filter(|(_, v)| matches!(v.as_str(), "N/A" | "Neuvedeno"))
@@ -166,10 +185,10 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
 
             info!(
                 "Pass 2 (PDF): {} N/A fields for {} — downloading {} PDFs",
-                missing_count, offer_id, pdf_urls.len()
+                missing_count, offer_id, doc_urls.len()
             );
 
-            pdf_tasks.push((offer_id, insurer, fields_map, pdf_urls, na_fields, doc_text, rfp_text));
+            pdf_tasks.push((offer_id, insurer, fields_map, doc_urls, na_fields, doc_text, rfp_text));
         } else {
             no_pdf_results.push((offer_id, insurer, fields_map));
         }
@@ -178,54 +197,57 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     // Process PDF fallbacks in parallel
     let pdf_futures: Vec<_> = pdf_tasks
         .into_iter()
-        .map(|(offer_id, insurer, mut fields_map, pdf_urls, na_fields, doc_text, rfp_text)| {
+        .map(|(offer_id, insurer, mut fields_map, doc_urls, na_fields, doc_text, rfp_text)| {
             async move {
-                // Download all PDFs in parallel
-                let download_futures: Vec<_> = pdf_urls
+                // Download all documents in parallel
+                let download_futures: Vec<_> = doc_urls
                     .iter()
-                    .map(|url| gemini.download_pdf(url))
+                    .map(|(url, _mime)| gemini.download_pdf(url))
                     .collect();
                 let downloads = futures::future::join_all(download_futures).await;
 
-                // Collect successful downloads
-                let mut pdf_bytes: Vec<Vec<u8>> = Vec::new();
-                for (result, url) in downloads.into_iter().zip(pdf_urls.iter()) {
+                // Collect successful downloads with their MIME types
+                let mut doc_bytes: Vec<(Vec<u8>, String)> = Vec::new();
+                for (result, (url, mime)) in downloads.into_iter().zip(doc_urls.iter()) {
                     match result {
                         Ok(bytes) => {
                             info!(
-                                "Downloaded PDF for {}: {} ({} bytes)",
+                                "Downloaded doc for {}: {} ({} bytes, {})",
                                 offer_id,
                                 url.split('/').last().unwrap_or("?"),
-                                bytes.len()
+                                bytes.len(),
+                                mime
                             );
-                            pdf_bytes.push(bytes);
+                            doc_bytes.push((bytes, mime.clone()));
                         }
-                        Err(e) => warn!("Failed to download PDF {}: {}", url, e),
+                        Err(e) => warn!("Failed to download {}: {}", url, e),
                     }
                 }
 
                 // Upload all in parallel
-                let upload_futures: Vec<_> = pdf_bytes
+                let upload_futures: Vec<_> = doc_bytes
                     .iter()
-                    .map(|bytes| gemini.upload_pdf(bytes))
+                    .map(|(bytes, mime)| gemini.upload_document(bytes, mime))
                     .collect();
                 let uploads = futures::future::join_all(upload_futures).await;
 
-                let pdf_uris: Vec<String> = uploads
+                // Collect URIs with their MIME types
+                let doc_uris: Vec<(String, String)> = uploads
                     .into_iter()
-                    .filter_map(|r| match r {
-                        Ok(uri) => Some(uri),
+                    .zip(doc_bytes.iter().map(|(_, mime)| mime.clone()))
+                    .filter_map(|(r, mime)| match r {
+                        Ok(uri) => Some((uri, mime)),
                         Err(e) => {
-                            warn!("Failed to upload PDF: {}", e);
+                            warn!("Failed to upload document: {}", e);
                             None
                         }
                     })
                     .collect();
 
-                if !pdf_uris.is_empty() {
+                if !doc_uris.is_empty() {
                     info!(
                         "Re-extracting {} N/A fields for {} with {} PDFs",
-                        na_fields.len(), offer_id, pdf_uris.len()
+                        na_fields.len(), offer_id, doc_uris.len()
                     );
 
                     let retry = gemini
@@ -237,7 +259,7 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                             &field_types,
                             &doc_text,
                             rfp_text.as_deref(),
-                            &pdf_uris,
+                            &doc_uris,
                         )
                         .await;
 

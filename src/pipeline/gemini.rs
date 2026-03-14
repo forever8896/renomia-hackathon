@@ -91,8 +91,9 @@ impl GeminiClient {
         Err(format!("All {MAX_RETRIES} retries failed: {last_err}"))
     }
 
-    /// Upload a PDF to Gemini File API, returns the file URI.
-    pub async fn upload_pdf(&self, pdf_bytes: &[u8]) -> Result<String, String> {
+    /// Upload a document to Gemini File API, returns the file URI.
+    /// Supports PDF and DOCX based on the provided MIME type.
+    pub async fn upload_document(&self, bytes: &[u8], mime_type: &str) -> Result<String, String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/upload/v1beta/files?key={}",
             self.api_key
@@ -100,13 +101,13 @@ impl GeminiClient {
 
         let resp = self.client.post(&url)
             .header("X-Goog-Upload-Command", "start, upload, finalize")
-            .header("X-Goog-Upload-Header-Content-Length", pdf_bytes.len().to_string())
-            .header("X-Goog-Upload-Header-Content-Type", "application/pdf")
-            .header("Content-Type", "application/pdf")
-            .body(pdf_bytes.to_vec())
+            .header("X-Goog-Upload-Header-Content-Length", bytes.len().to_string())
+            .header("X-Goog-Upload-Header-Content-Type", mime_type)
+            .header("Content-Type", mime_type)
+            .body(bytes.to_vec())
             .send()
             .await
-            .map_err(|e| format!("PDF upload failed: {e}"))?;
+            .map_err(|e| format!("Document upload failed: {e}"))?;
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -248,7 +249,7 @@ Fields to extract:
         field_types: &HashMap<String, String>,
         documents_text: &str,
         rfp_text: Option<&str>,
-        pdf_uris: &[String], // Gemini file URIs for uploaded PDFs
+        doc_uris: &[(String, String)], // Gemini file URIs for uploaded PDFs
     ) -> HashMap<String, String> {
         let fields_list: String = fields
             .iter()
@@ -284,10 +285,10 @@ Fields to extract:
             "temperature": 0.0,
         });
 
-        // Build parts: PDFs first, then text prompt
+        // Build parts: documents first, then text prompt
         let mut parts = Vec::new();
-        for uri in pdf_uris {
-            parts.push(json!({"fileData": {"fileUri": uri, "mimeType": "application/pdf"}}));
+        for (uri, mime) in doc_uris {
+            parts.push(json!({"fileData": {"fileUri": uri, "mimeType": mime}}));
         }
         parts.push(json!({"text": prompt}));
 
@@ -321,13 +322,13 @@ Fields to extract:
         field_types: &HashMap<String, String>,
         documents_text: &str,
         rfp_text: Option<&str>,
-        pdf_uris: &[String],
+        doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
         let mut all_results = HashMap::new();
 
         if fields.len() <= BATCH_SIZE {
             all_results = self.extract_fields_single_batch(
-                insurer, segment, fields, field_types, documents_text, rfp_text, pdf_uris,
+                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
             ).await;
         } else {
             let batches: Vec<&[String]> = fields.chunks(BATCH_SIZE).collect();
@@ -337,7 +338,7 @@ Fields to extract:
                 .iter()
                 .map(|batch| {
                     self.extract_fields_single_batch(
-                        insurer, segment, batch, field_types, documents_text, rfp_text, pdf_uris,
+                        insurer, segment, batch, field_types, documents_text, rfp_text, doc_uris,
                     )
                 })
                 .collect();
@@ -362,7 +363,7 @@ Fields to extract:
             );
 
             let retry_results = self.extract_fields_single_batch(
-                insurer, segment, &na_fields, field_types, documents_text, rfp_text, pdf_uris,
+                insurer, segment, &na_fields, field_types, documents_text, rfp_text, doc_uris,
             ).await;
 
             for (field, value) in retry_results {
