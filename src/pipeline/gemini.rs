@@ -188,8 +188,16 @@ impl GeminiClient {
 
 CRITICAL RULES:
 1. For NUMBER type fields: return ONLY the plain numeric value as digits (e.g. "34851", "150000000", "5000"). Remove currency symbols (Kč, CZK, EUR, €), spaces, dots/commas used as thousands separators. Keep decimal points for fractional values (e.g. "459.35"). If the value contains a percentage or formula like "3 % / min. CZK 3 000", return it as-is since it's not a pure number.
-2. For STRING type fields: return a concise value. For yes/no coverages, prefer "Ano" or "Ne" with brief qualifiers only when they change the meaning, e.g. "Ano (jen řidič)", "Ne (lze připojistit)".
-3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a coverage is part of an "Allrisk" package, it's "Ano". If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort when the field topic is completely absent from all documents.
+2. For STRING type fields:
+   - Include relevant qualifiers that add information: deductible amounts, conditions, prices for add-ons
+   - Examples of GOOD answers: "Ano, se spoluúčastí CZK 1,000", "Ne (lze připojistit za CZK 1 485)", "Ano (jen řidič)", "Ne, pouze připojištění", "Volba servisu, sleva CZK 3,000"
+   - Do NOT add product variant names or marketing labels: return "Allrisk" not "Allrisk (Varianta Max)", return "Ano" not "Ano (součást balíčku)"
+   - When coverage is optional/add-on, always include the price if mentioned: "Ne (lze připojistit za CZK 1 485)" not just "Ne (lze připojistit)"
+3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort when the field topic is completely absent from all documents.
+   IMPORTANT: Do NOT assume "Allrisk" covers everything. Check the actual document for each coverage:
+   - Some Allrisk packages EXCLUDE certain coverages (e.g. skla, střet se zvěří may need separate add-on)
+   - If a coverage is listed as optional/add-on even within Allrisk, answer "Ne (lze připojistit)" or "Ne, pouze připojištění"
+   - Only answer "Ano" for coverages explicitly listed as included in the offer
 4. Search ALL text carefully — values may be in tables, lists, footnotes, summaries, appendices, or scattered across sections. Documents may be in Czech, English, or German.
 5. MOST CRITICAL — PREMIUMS vs COVERAGE LIMITS:
    When the field list contains cost-related fields together (pojistné, CELKEM, Sleva, pojistné před slevou), then bare insurance product names as fields refer to the PREMIUM (cost) for that product, NOT the coverage limit:
