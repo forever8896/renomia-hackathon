@@ -10,8 +10,9 @@ use crate::models::{OfferParsed, SolveRequest, SolveResponse};
 use gemini::GeminiClient;
 use normalizer::{is_vpp_document, normalize_ocr};
 
-const MAX_OCR_CHARS: usize = 200_000;
-/// Include VPP only if primary docs total < this threshold
+const MAX_OCR_CHARS: usize = 800_000;
+/// Always include VPP if primary docs + VPP fit within budget,
+/// or if primary docs are sparse (< this threshold)
 const SPARSE_DOC_THRESHOLD: usize = 10_000;
 
 /// Find the largest index <= `pos` that is a valid char boundary.
@@ -84,19 +85,19 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                 doc_text.push('\n');
             }
 
-            // Include VPP only if primary docs are too sparse
-            if primary_total < SPARSE_DOC_THRESHOLD {
+            // Include VPP docs if there's room in the budget
+            if !vpp_docs.is_empty() {
                 for (filename, text) in &vpp_docs {
                     let budget = MAX_OCR_CHARS.saturating_sub(doc_text.len());
                     if budget < 2000 {
                         break;
                     }
                     info!(
-                        "Including VPP doc {} for sparse offer {} (primary={} chars)",
-                        filename, offer_id, primary_total
+                        "Including VPP doc {} for offer {} ({} chars, budget {})",
+                        filename, offer_id, text.len(), budget
                     );
                     doc_text.push_str(&format!(
-                        "\n=== Supplementary Document: {} ===\n",
+                        "\n=== Supplementary Document (General Terms): {} ===\n",
                         filename
                     ));
                     if text.len() > budget {

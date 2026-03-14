@@ -161,7 +161,7 @@ def main():
     subprocess.run(["curl", "-s", "-X", "POST", f"{SERVER_URL}/metrics/reset"],
                    capture_output=True, timeout=10)
 
-    tests = [("87", "auta"), ("88", "lodě"), ("86", "odpovědnost")]
+    tests = [("100", "auta"), ("101", "lodě"), ("99", "odpovědnost")]
     results = []
 
     for test_id, name in tests:
