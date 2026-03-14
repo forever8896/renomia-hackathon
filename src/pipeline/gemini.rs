@@ -8,7 +8,6 @@ use tracing::{error, info, warn};
 use crate::metrics::Metrics;
 
 const EXTRACT_MODEL: &str = "gemini-2.5-pro";
-const RANK_MODEL: &str = "gemini-2.5-flash";
 const MAX_RETRIES: u32 = 4;
 const BATCH_SIZE: usize = 22;
 const MAX_PDF_SIZE: usize = 20_000_000; // 20MB limit for Gemini file upload
@@ -28,16 +27,29 @@ impl GeminiClient {
         }
     }
 
-    async fn call_gemini(&self, model: &str, contents: Value, generation_config: Value) -> Result<Value, String> {
+    async fn call_gemini(
+        &self,
+        model: &str,
+        contents: Value,
+        generation_config: Value,
+        system_instruction: Option<&str>,
+    ) -> Result<Value, String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
             model, self.api_key
         );
 
-        let body = json!({
+        let mut body = json!({
             "contents": contents,
             "generationConfig": generation_config,
         });
+
+        if let Some(sys_text) = system_instruction {
+            body.as_object_mut().unwrap().insert(
+                "system_instruction".to_string(),
+                json!({"parts": [{"text": sys_text}]}),
+            );
+        }
 
         let mut last_err = String::new();
         for attempt in 0..MAX_RETRIES {
@@ -76,7 +88,9 @@ impl GeminiClient {
                             .and_then(|v| v.as_u64()).unwrap_or(0);
                         let completion_tokens = usage.get("candidatesTokenCount")
                             .and_then(|v| v.as_u64()).unwrap_or(0);
-                        self.metrics.add(prompt_tokens, completion_tokens);
+                        let thoughts_tokens = usage.get("thoughtsTokenCount")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        self.metrics.add(prompt_tokens, completion_tokens + thoughts_tokens);
                     }
 
                     return Ok(parsed);
@@ -147,29 +161,30 @@ impl GeminiClient {
     }
 
     fn extract_text_from_response(parsed: &Value) -> Result<String, String> {
-        parsed
+        // With thinking enabled, there may be multiple parts — find the one with text (not thought)
+        let parts = parsed
             .get("candidates")
             .and_then(|c| c.get(0))
             .and_then(|c| c.get("content"))
             .and_then(|c| c.get("parts"))
-            .and_then(|p| p.get(0))
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .map(|s| s.to_string())
-            .ok_or_else(|| "No text in Gemini response".to_string())
+            .and_then(|p| p.as_array())
+            .ok_or_else(|| "No parts in Gemini response".to_string())?;
+
+        // Return the last text part that is not a thought
+        for part in parts.iter().rev() {
+            if part.get("thought").and_then(|t| t.as_bool()).unwrap_or(false) {
+                continue;
+            }
+            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                return Ok(text.to_string());
+            }
+        }
+
+        Err("No text in Gemini response".to_string())
     }
 
-    fn build_extraction_prompt(
-        insurer: &str,
-        segment: &str,
-        fields_list: &str,
-        documents_text: &str,
-        rfp_text: Option<&str>,
-    ) -> String {
-        let mut prompt = format!(
-            r#"You are an expert insurance document analyst specializing in Czech and international insurance markets.
-
-TASK: Extract these fields from the insurance offer by "{insurer}" in the "{segment}" segment.
+    fn extraction_system_instruction() -> String {
+        r#"You are an expert insurance document analyst specializing in Czech and international insurance markets.
 
 CRITICAL RULES:
 1. For NUMBER type fields: return ONLY the plain numeric value as digits (e.g. "34851", "150000000", "5000"). Remove currency symbols (Kč, CZK, EUR, €), spaces, dots/commas used as thousands separators. Keep decimal points for fractional values (e.g. "459.35"). If the value contains a percentage or formula like "3 % / min. CZK 3 000", return it as-is since it's not a pure number.
@@ -199,7 +214,18 @@ CRITICAL RULES:
    - "CELKEM" = "Total" / "Gesamt" / "Total premium"
    - "roční pojistné" = "annual premium" / "Jahresprämie"
    - "pojistná částka" / "Sum insured" = coverage limit (NOT premium)
-   - "Pojištěná částka v případě úmrtí" = "Sum insured in case of death"
+   - "Pojištěná částka v případě úmrtí" = "Sum insured in case of death""#.to_string()
+    }
+
+    fn build_extraction_prompt(
+        insurer: &str,
+        segment: &str,
+        fields_list: &str,
+        documents_text: &str,
+        rfp_text: Option<&str>,
+    ) -> String {
+        let mut prompt = format!(
+            r#"TASK: Extract these fields from the insurance offer by "{insurer}" in the "{segment}" segment.
 
 Fields to extract:
 {fields_list}
@@ -264,25 +290,35 @@ Fields to extract:
 
         let mut properties = serde_json::Map::new();
         let mut required = vec!["reasoning".to_string()];
+        let mut property_ordering = vec!["reasoning".to_string()];
         properties.insert(
             "reasoning".to_string(),
             json!({"type": "STRING", "description": "Brief reasoning about what you found"}),
         );
         for field in fields {
-            properties.insert(field.clone(), json!({"type": "STRING"}));
+            let ftype = field_types.get(field).map(|s| s.as_str()).unwrap_or("string");
+            let description = if ftype == "number" {
+                "Numeric value as plain digits"
+            } else {
+                "Text value, use Ano/Ne for boolean fields"
+            };
+            properties.insert(field.clone(), json!({"type": "STRING", "description": description}));
             required.push(field.clone());
+            property_ordering.push(field.clone());
         }
 
         let response_schema = json!({
             "type": "OBJECT",
             "properties": properties,
             "required": required,
+            "propertyOrdering": property_ordering,
         });
 
         let generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
             "temperature": 0.0,
+            "thinkingConfig": {"thinkingBudget": 2048},
         });
 
         // Build parts: documents first, then text prompt
@@ -294,7 +330,9 @@ Fields to extract:
 
         let contents = json!([{"parts": parts}]);
 
-        match self.call_gemini(EXTRACT_MODEL, contents, generation_config).await {
+        let system_instruction = Self::extraction_system_instruction();
+
+        match self.call_gemini(EXTRACT_MODEL, contents, generation_config, Some(&system_instruction)).await {
             Ok(parsed) => {
                 match Self::extract_text_from_response(&parsed) {
                     Ok(text) => Self::parse_extraction_response(&text, fields),
@@ -375,79 +413,5 @@ Fields to extract:
         }
 
         all_results
-    }
-
-    pub async fn rank_offers(
-        &self,
-        segment: &str,
-        offers: &[(String, String, HashMap<String, String>)],
-        field_types: &HashMap<String, String>,
-    ) -> Result<Vec<String>, String> {
-        let mut offers_text = String::new();
-        for (id, insurer, fields) in offers {
-            offers_text.push_str(&format!("\n## Offer: {} ({})\n", insurer, id));
-            for (field, value) in fields {
-                let ftype = field_types.get(field).map(|s| s.as_str()).unwrap_or("string");
-                offers_text.push_str(&format!("- {} [{}]: {}\n", field, ftype, value));
-            }
-        }
-
-        let offer_ids: Vec<&str> = offers.iter().map(|(id, _, _)| id.as_str()).collect();
-        let ids_json = serde_json::to_string(&offer_ids).unwrap();
-
-        let prompt = format!(
-            r#"You are comparing {n} insurance offers in the "{segment}" segment.
-Rank them from best (most favorable to the client/buyer) to worst.
-
-For ranking, consider:
-- Lower annual premium (Roční pojistné) is better
-- Higher coverage limits (limit, pojistná částka) are better
-- Lower deductibles (spoluúčast) are better
-- More included coverages (Ano > Ne) is better
-- Coverage breadth and quality matters more than small price differences
-- For the "{segment}" segment, weigh all factors holistically
-
-The offer IDs are: {ids_json}
-
-{offers_text}
-
-Return a JSON array of offer IDs from best to worst. Use ONLY these exact IDs: {ids_json}"#,
-            n = offers.len(),
-        );
-
-        let response_schema = json!({
-            "type": "ARRAY",
-            "items": {"type": "STRING"},
-        });
-
-        let generation_config = json!({
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema,
-            "temperature": 0.0,
-        });
-
-        let contents = json!([{"parts": [{"text": prompt}]}]);
-
-        let parsed = self.call_gemini(RANK_MODEL, contents, generation_config).await?;
-        let text = Self::extract_text_from_response(&parsed)?;
-
-        let ranking: Vec<String> = serde_json::from_str(&text)
-            .map_err(|e| format!("Failed to parse ranking: {e}, text: {text}"))?;
-
-        let valid_ids: std::collections::HashSet<&str> = offer_ids.iter().copied().collect();
-        let mut seen = std::collections::HashSet::new();
-        let mut validated = Vec::new();
-        for id in &ranking {
-            if valid_ids.contains(id.as_str()) && seen.insert(id.as_str()) {
-                validated.push(id.clone());
-            }
-        }
-        for id in &offer_ids {
-            if !seen.contains(id) {
-                validated.push(id.to_string());
-            }
-        }
-
-        Ok(validated)
     }
 }

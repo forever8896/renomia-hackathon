@@ -313,17 +313,9 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
         ranking_input.push((id.clone(), insurer.clone(), fields_map.clone()));
     }
 
-    // Rank offers
-    let ranking = match gemini.rank_offers(segment, &ranking_input, field_types).await {
-        Ok(r) => {
-            info!("Ranking result: {:?}", r);
-            r
-        }
-        Err(e) => {
-            warn!("Gemini ranking failed: {e}, using fallback");
-            ranker::fallback_rank(&ranking_input)
-        }
-    };
+    // Rank offers deterministically (no LLM call needed)
+    let ranking = ranker::deterministic_rank(&ranking_input, field_types);
+    info!("Deterministic ranking result: {:?}", ranking);
 
     let best_offer_id = ranking.first().cloned().unwrap_or_default();
 
