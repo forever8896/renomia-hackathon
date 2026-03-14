@@ -52,11 +52,12 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let field_types = field_types.clone();
             let rfp_text = rfp_text.clone();
 
-            // Collect non-VPP PDF URLs for potential pass 2
+            // Collect non-VPP PDF URLs for potential pass 2 (only actual PDFs, not .docx)
             let pdf_urls: Vec<String> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
+                .filter(|doc| doc.filename.to_lowercase().ends_with(".pdf"))
                 .filter_map(|doc| doc.pdf_url.clone())
                 .filter(|url| !url.is_empty())
                 .collect();
