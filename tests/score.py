@@ -58,17 +58,8 @@ def score_string(expected: str, actual: str) -> float:
     a = re.sub(r'\s+', ' ', actual.lower().strip())
     if e == a:
         return 1.0
-    # Character-level Dice similarity
-    e_chars = set(enumerate(e))
-    a_chars = set(enumerate(a))
-    # Simpler: bigram similarity
-    def bigrams(s):
-        return [s[i:i+2] for i in range(len(s)-1)] if len(s) > 1 else [s]
-    eb = bigrams(e)
-    ab = bigrams(a)
-    common = sum(1 for b in ab if b in eb)
-    total = len(eb) + len(ab)
-    sim = 2 * common / total if total > 0 else 0
+    from rapidfuzz import fuzz
+    sim = fuzz.ratio(e, a) / 100.0
     return sim if sim > 0.5 else 0.0
 
 
