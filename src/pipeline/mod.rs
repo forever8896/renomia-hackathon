@@ -58,6 +58,68 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
         normalized[..end].to_string()
     });
 
+    // === Cross-offer document attribution ===
+    // Build an index: for each insurer name, find documents from OTHER offers
+    // that mention this insurer prominently (broker/underwriter mismatch detection)
+    let mut cross_ref_docs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // offer_id -> [(filename, normalized_text)]
+    let mut cross_ref_pdfs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // offer_id -> [(url, mime)]
+
+    // Only cross-reference for offers that have very little own content
+    let sparse_offers: Vec<String> = request.offers.iter()
+        .filter(|o| {
+            let own_text: usize = o.documents.iter()
+                .filter(|d| !is_vpp_document(&d.filename))
+                .map(|d| d.ocr_text.len())
+                .sum();
+            own_text < 15_000 // sparse = less than 15K chars of primary docs
+        })
+        .map(|o| o.id.clone())
+        .collect();
+
+    for offer in &request.offers {
+        // Only cross-reference for sparse offers
+        if !sparse_offers.contains(&offer.id) {
+            continue;
+        }
+        let offer_insurer_lower = offer.insurer.to_lowercase();
+        for other_offer in &request.offers {
+            if other_offer.id == offer.id {
+                continue;
+            }
+            for doc in &other_offer.documents {
+                if doc.ocr_text.is_empty() || is_vpp_document(&doc.filename) {
+                    continue;
+                }
+                let text_lower = doc.ocr_text.to_lowercase();
+                // Count mentions — needs very high count to avoid false positives
+                let mention_count = text_lower.matches(&offer_insurer_lower).count();
+                if mention_count >= 15 {
+                    info!(
+                        "Cross-ref: doc '{}' (filed under {}) mentions '{}' {} times → attributing to {}",
+                        doc.filename, other_offer.id, offer.insurer, mention_count, offer.id
+                    );
+                    let normalized = normalize_ocr(&doc.ocr_text);
+                    cross_ref_docs
+                        .entry(offer.id.clone())
+                        .or_default()
+                        .push((doc.filename.clone(), normalized));
+
+                    // Also grab the PDF URL if it's a .pdf
+                    if doc.filename.to_lowercase().ends_with(".pdf") {
+                        if let Some(url) = &doc.pdf_url {
+                            if !url.is_empty() {
+                                cross_ref_pdfs
+                                    .entry(offer.id.clone())
+                                    .or_default()
+                                    .push((url.clone(), "application/pdf".to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // === Pass 1: Extract from OCR text (parallel across offers) ===
     let extraction_futures: Vec<_> = request
         .offers
@@ -70,10 +132,8 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let field_types = field_types.clone();
             let rfp_text = rfp_text.clone();
 
-            // Collect non-VPP PDF URLs for potential pass 2 (only actual PDFs, not .docx)
-            // Collect doc URLs + MIME types for potential PDF fallback
-            // Skip VPP docs and non-PDF files (Gemini only supports PDF for fileData)
-            let doc_urls: Vec<(String, String)> = offer
+            // Collect PDF URLs: own docs + cross-referenced docs
+            let mut doc_urls: Vec<(String, String)> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
@@ -84,8 +144,12 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     Some((url, "application/pdf".to_string()))
                 })
                 .collect();
+            // Add cross-referenced PDFs
+            if let Some(xref_pdfs) = cross_ref_pdfs.get(&offer_id) {
+                doc_urls.extend(xref_pdfs.clone());
+            }
 
-            // Build OCR text: primary docs + VPP if room
+            // Build OCR text: primary docs + cross-referenced docs + VPP if room
             let mut primary_docs = Vec::new();
             let mut vpp_docs = Vec::new();
 
@@ -101,6 +165,16 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     vpp_docs.push((doc.filename.clone(), normalized));
                 } else {
                     primary_docs.push((doc.filename.clone(), normalized));
+                }
+            }
+
+            // Add cross-referenced docs as primary
+            if let Some(xref_docs) = cross_ref_docs.get(&offer_id) {
+                for (filename, text) in xref_docs {
+                    primary_docs.push((
+                        format!("[Cross-ref] {}", filename),
+                        text.clone(),
+                    ));
                 }
             }
 
