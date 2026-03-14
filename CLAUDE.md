@@ -110,10 +110,13 @@ Build a `/solve` REST endpoint in **Rust** that receives OCR-extracted text from
 **Expected:** contractNumber="C555010631", insurerName="Allianz", state="accepted", assetType="other", concludedAs="broker", contractRegime="individual", startAt="17.01.2022", endAt=null, concludedAt="17.01.2022", installmentNumberPerInsurancePeriod=1, insurancePeriodMonths=12, premium={currency:"czk",isCollection:false}, actionOnInsurancePeriodTermination="auto-renewal", noticePeriod="six-weeks", regPlate=null, latestEndorsementNumber="DOP 098", note="Exclusions for infectious diseases..."
 
 ### Key Observations
-- `isCollection: true` = premium paid via broker account ("inkasní makléř")
+- `isCollection: true` = premium paid via broker account ("inkasní makléř" / "inkaso")
+- `isCollection: false` = premium paid directly to insurer ("přímá platba" / "platba na účet pojistitele" / no mention of broker collection)
 - `"doba neurčitá"` = endAt: null (indefinite term)
 - latestEndorsementNumber can be plain ("3") or prefixed ("DOP 098")
-- noticePeriod is English ("six-weeks") or null
+- noticePeriod is English, hyphenated lowercase ("six-weeks") or null.
+  Prompt must specify format: "Return as lowercase English hyphenated words,
+  e.g. 'six-weeks', 'three-months', 'one-month'. Not '6 weeks' or '6 týdnů'."
 - note can be Czech or English
 - VPP docs provide context but don't override fields
 
@@ -134,6 +137,7 @@ Build a `/solve` REST endpoint in **Rust** that receives OCR-extracted text from
 |-------|-------|-------|
 | doba neurčitá | endAt | null |
 | inkasní makléř / inkaso | premium.isCollection | true |
+| přímá platba / platba na účet pojistitele | premium.isCollection | false |
 | roční / ročně | installmentNumberPerInsurancePeriod | 1 |
 | pololetně | installmentNumberPerInsurancePeriod | 2 |
 | čtvrtletně | installmentNumberPerInsurancePeriod | 4 |
@@ -154,45 +158,69 @@ Build a `/solve` REST endpoint in **Rust** that receives OCR-extracted text from
 |----------------|-----------|-------------|
 | Lexer | Text Normalizer | OCR cleanup, Unicode NFC, whitespace normalization |
 | Parser | Structural Analyzer | Section/table/key-value detection, doc classification + ordering |
-| Semantic Analysis | 3-Tier Extraction | Regex → Gemini Flash → Gemini Pro |
-| Optimizer | Cache + Merge | Semantic caching, amendment chain resolution |
+| Semantic Analysis | 2-Tier Extraction | Gemini Flash → Gemini Pro (validation-triggered) |
+| Optimizer | Validate + Escalate | Post-processing validation, Tier 2 escalation on failure |
 | Code Gen | Output Builder | Final JSON + provenance + metrics |
 
-### 3-Tier Extraction
+### Extraction Pipeline
 ```
-Tier 0: Deterministic (0 tokens, <1ms)
-  - contractNumber (regex: "č." / "číslo smlouvy" patterns)
-  - dates: startAt, endAt, concludedAt (DD.MM.YYYY regex)
-  - regPlate (Czech plate format regex)
-  - latestEndorsementNumber (filename parsing — deterministic, never use LLM)
-  - Document classification + chronological ordering
-  → Resolves 4-6 fields
+Pre-processing (0 tokens, <1ms):
+  - Document classification from filenames (base contract / amendment / VPP)
+  - Chronological ordering of amendments by number
+  - latestEndorsementNumber from filenames when available (D1,D2,D3 → "3")
+  - OCR text normalization (whitespace collapse, Unicode NFC)
+  - VPP documents filtered out (no CRM field values, saves ~30KB tokens)
 
-Tier 1: Gemini Flash (fast, cheap, ~300ms)
-  - All remaining fields via responseSchema (structured output)
-  - Self-reported confidence per field
+Tier 1: Gemini Flash — SINGLE CALL (fast, cheap)
+  - Send ALL documents (base + amendments) in ONE call, ordered chronologically
+  - Each document labeled: "[BASE CONTRACT: PS 3301 0150 23.pdf]", "[AMENDMENT 1: D1...]"
+  - Prompt instructs: "Documents are in chronological order. Later amendments
+    override earlier values. Return the FINAL/CURRENT values after all amendments."
+  - ALL 17 CRM fields extracted via responseSchema (structured output)
   - "reasoning" field in schema for chain-of-thought
   - Czech glossary + enum constraints in schema descriptions
-  → Resolves 10-12 fields
+  - Total input: ~35KB in one call (vs ~37KB across 4 separate calls)
+  - Saves 3x per-call overhead and latency vs per-document extraction
+  → Resolves all 17 fields in most cases
 
-Tier 2: Gemini Pro (only when needed, ~20% of requests)
-  - Re-extract ONLY fields where Tier 1 confidence < 0.8
-  - More detailed prompt with examples for those specific fields
-  → Fixes 0-2 fields
+Tier 2: Gemini Pro (validation-triggered, ~20% of requests)
+  Triggered by concrete validation failures, NOT self-reported confidence:
+  - Extracted enum value not in allowed set
+  - Date parsing failure or impossible date (e.g. "32.13.2024")
+  - Required field returned as null/empty
+  - latestEndorsementNumber is null but amendments exist in input
+  Re-extracts ONLY the failed fields with a more detailed prompt + examples
+  → Fixes 0-3 fields
 ```
 
-### Amendment Resolution: Layer-by-Layer
-1. Extract base contract fields (Tier 0 + Tier 1)
-2. For each amendment in chronological order, extract ONLY changed fields
-3. Programmatic merge in Rust: later amendments override earlier values
-4. More reliable and debuggable than single mega-prompt
+### Amendment Resolution: Single-Call with LLM Merge
+- All documents sent in ONE Gemini call, ordered chronologically with clear labels
+- The LLM sees the full context and resolves the amendment chain itself
+- Prompt explicitly instructs: "Later amendments override earlier provisions.
+  Return the FINAL values reflecting all amendments."
+- This is more token-efficient (one call vs N calls) and gives the LLM full
+  context for cross-document reasoning
+- If no amendments exist, it's just a single-document extraction
+- Debuggability: the "reasoning" field in the schema MUST include per-document
+  notes (e.g. "Amendment 2 changed endAt from X to Y") so extraction errors
+  can be traced back to specific documents post-hoc
 
 ### Post-Processing Pipeline
-1. Enum validation — reject invalid values
+1. Enum validation — if value not in allowed set → trigger Tier 2 re-extraction
 2. Date normalization — `D.M.YYYY` → `DD.MM.YYYY`, `"doba neurčitá"` → null
 3. Currency lowercase — `CZK` → `czk`
-4. Cross-field consistency — startAt < endAt, concludedAt ≤ startAt
-5. latestEndorsementNumber — always from filename parsing, not LLM
+4. Cross-field consistency (soft checks, log warnings but do NOT override LLM values):
+   - startAt < endAt (when endAt is not null)
+   - These are sanity checks only — edge cases like retroactive coverage exist
+5. latestEndorsementNumber — prefer filename-derived value when available,
+   fall back to LLM-extracted value when filenames don't contain endorsement numbers
+
+### Gemini API Error Handling
+- Retry on 429 (rate limit) and 503 (overloaded) with exponential backoff: 1s, 2s, 4s, max 3 retries
+- Timeout per call: 30s (Flash), 60s (Pro)
+- If Gemini is down after retries: return HTTP 503 with error message (returning 16 nulls would score worse than failing loudly)
+- If structured output deserialization fails: retry once with same model before escalating to Tier 2
+- Implement retry logic manually in gemini.rs (simple loop + tokio::time::sleep)
 
 ### Token Tracking (REQUIRED)
 Every Gemini API call MUST track and return:
@@ -213,21 +241,17 @@ Every Gemini API call MUST track and return:
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-schemars = "0.8"
-regex = "1"
+# Gemini responseSchema is a restrictive JSON Schema subset (no $ref, oneOf, anyOf).
+# Build the schema as a serde_json::Value by hand in gemini.rs — don't use schemars.
 chrono = "0.4"
-minijinja = { version = "2", features = ["builtins"] }
-moka = { version = "0.12", features = ["future"] }
-sha2 = "0.10"
 unicode-normalization = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [profile.release]
-opt-level = "z"
+opt-level = 3              # Optimize for speed — runtime is a scoring criterion; binary size barely affects memory score
 lto = true
 codegen-units = 1
 panic = "abort"
@@ -242,15 +266,14 @@ src/
 ├── pipeline/
 │   ├── mod.rs             # Pipeline orchestrator
 │   ├── normalizer.rs      # OCR text cleanup, Unicode NFC, whitespace
-│   ├── classifier.rs      # Filename → doc type + amendment ordering
-│   ├── regex_extractor.rs # Tier 0: deterministic extraction
-│   ├── gemini.rs          # Tier 1 & 2: API client, prompt building, token tracking
-│   └── merger.rs          # Amendment chain merge logic
-├── cache.rs               # L1 (moka in-process) + L2 (PostgreSQL) cache
+│   ├── classifier.rs      # Filename → doc type + ordering + latestEndorsementNumber from filenames
+│   │                      # Uses str::contains/starts_with, no regex needed
+│   └── gemini.rs          # Tier 1 & 2: API client, prompt construction, token tracking, retry logic
+│                          # Prompt template embedded via include_str!("prompts/extract.txt")
 ├── validation.rs          # Post-processing: enum/date/cross-field checks
 ├── metrics.rs             # Per-request token/latency/tier tracking
 └── prompts/
-    └── extract.j2         # Jinja2 prompt template (hot-reloadable)
+    └── extract.txt         # Prompt template, embedded at compile time via include_str!
 ```
 
 ### Prompt Strategy
@@ -258,7 +281,12 @@ src/
 - Czech insurance glossary in system instruction
 - responseSchema with `enum` constraints (enforced at Gemini decoding level)
 - `"reasoning"` string field in schema captures chain-of-thought inside JSON
-- VPP docs: skip unless base contract explicitly references them (saves ~30KB tokens)
+- noticePeriod format explicitly specified: "lowercase English hyphenated words (e.g. 'six-weeks')"
+- Prompt template embedded at compile time via `include_str!("prompts/extract.txt")` — no
+  runtime template engine needed, no file I/O in distroless container
+- VPP docs: skip by default — they contain general terms/definitions, not CRM field values.
+  VPP text wastes ~30KB tokens without improving extraction accuracy.
+  Only include VPP on Tier 2 retry if initial extraction returns incomplete results.
 
 ### Binary Optimization for Cloud Run
 - rustls (no OpenSSL) → fully static-friendly
@@ -277,9 +305,9 @@ src/
 
 ### OnePager (1 PowerPoint slide)
 Must answer:
-- What was used? → Rust, axum, Gemini API, 3-tier extraction
-- What is the novelty? → Compiler-style pipeline, zero-token regex tier, tiered model cascade
-- Why this approach? → Optimizes all 4 axes: accuracy (3 tiers), runtime (Rust), memory (distroless), tokens (regex first)
+- What was used? → Rust, axum, Gemini API, 2-tier extraction
+- What is the novelty? → Compiler-style pipeline in Rust, validation-triggered model escalation (Flash → Pro only on failure), single-call amendment chain resolution
+- Why this approach? → Optimizes all 4 axes: accuracy (validation-driven Tier 2), runtime (Rust cold start <100ms), memory (distroless ~20MB), tokens (single call, no VPP waste)
 
 Judged on: Novelty, readability, understandability, uniqueness
 
