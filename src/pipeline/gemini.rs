@@ -300,6 +300,69 @@ impl GeminiClient {
         Err("No text in Gemini response".to_string())
     }
 
+    /// Generate a smart description for a field based on its name and type.
+    fn field_description(field: &str, ftype: &str) -> String {
+        let fl = field.to_lowercase();
+
+        if ftype == "number" {
+            if fl.contains("roční pojistn") || fl.contains("celkem") || fl == "roční pojistné:" {
+                return "Annual premium as plain number (e.g. 34851)".to_string();
+            }
+            if fl.contains("spoluúčast") {
+                if fl.contains("skla") || fl.contains("skel") {
+                    return "Glass deductible - if % and min, return as formula e.g. '3 % / min. CZK 3 000'".to_string();
+                }
+                return "Deductible as plain number (e.g. 5000), or formula if % (e.g. '3 % / min. CZK 3 000')".to_string();
+            }
+            if fl.contains("limit") {
+                return "Coverage limit as plain number (e.g. 50000000 for 50 mil)".to_string();
+            }
+            if fl.contains("částk") {
+                return "Sum insured as plain number".to_string();
+            }
+            if fl.contains("sleva") {
+                return "Discount amount as plain number".to_string();
+            }
+            if fl.contains("pojistn") && !fl.contains("limit") {
+                return "Premium/cost as plain number".to_string();
+            }
+            return "Numeric value as plain digits".to_string();
+        }
+
+        // String fields
+        if fl.contains("krytí") || fl.contains("pojištění") && !fl.contains("limit") && !fl.contains("spoluúčast") {
+            return "Coverage: 'Ano' / 'Ano, se spoluúčastí CZK X' / 'Ne (lze připojistit za CZK X)' / 'Ne, pouze připojištění'".to_string();
+        }
+        if fl.contains("typ") && fl.contains("havarijní") {
+            return "'Allrisk' or 'Allrisk + GAP' — no variant names".to_string();
+        }
+        if fl.contains("rozsah") && fl.contains("servis") {
+            return "'Volba servisu' / 'Povinné smluvní servisy' / 'Volba servisu, sleva CZK X'".to_string();
+        }
+        if fl.contains("asistenční") && fl.contains("rozsah") {
+            return "Concise: 'Rozšířená asistence' / '30 min / 50–100 km' / 'CZK 2 500 / CZK 5 000'".to_string();
+        }
+        if fl.contains("počet") && fl.contains("asisten") {
+            return "'Neomezeno' or 'Omezeno' — no detailed descriptions".to_string();
+        }
+        if fl.contains("přímá likvidace") {
+            return "'Ano' or 'Ne (lze připojistit)'".to_string();
+        }
+        if fl.contains("právní ochrana") {
+            return "'Ano' / 'Ano (právní poradenství)' / 'Ne (lze připojistit za CZK 1 485)'".to_string();
+        }
+        if fl.contains("úrazové") {
+            return "'Ano' / 'Ano (jen řidič)' / 'Volitelné připojištění' / 'Ne (lze připojistit)'".to_string();
+        }
+        if fl.contains("územní rozsah") {
+            return "Territory list: 'Česká republika, Slovensko, Polsko'".to_string();
+        }
+        if fl.contains("vyloučen") {
+            return "Concise summary of exclusions".to_string();
+        }
+        "Text value, use Ano/Ne for boolean fields".to_string()
+    }
+
     fn extraction_system_instruction() -> String {
         r#"You are an expert insurance document analyst specializing in Czech and international insurance markets.
 
@@ -432,11 +495,7 @@ Fields to extract:
         );
         for field in fields {
             let ftype = field_types.get(field).map(|s| s.as_str()).unwrap_or("string");
-            let description = if ftype == "number" {
-                "Numeric value as plain digits"
-            } else {
-                "Text value, use Ano/Ne for boolean fields"
-            };
+            let description = Self::field_description(field, ftype);
             properties.insert(field.clone(), json!({"type": "STRING", "description": description}));
             required.push(field.clone());
             property_ordering.push(field.clone());
@@ -516,11 +575,7 @@ Fields to extract:
         );
         for field in fields {
             let ftype = field_types.get(field).map(|s| s.as_str()).unwrap_or("string");
-            let description = if ftype == "number" {
-                "Numeric value as plain digits"
-            } else {
-                "Text value, use Ano/Ne for boolean fields"
-            };
+            let description = Self::field_description(field, ftype);
             properties.insert(field.clone(), json!({"type": "STRING", "description": description}));
             required.push(field.clone());
             property_ordering.push(field.clone());
