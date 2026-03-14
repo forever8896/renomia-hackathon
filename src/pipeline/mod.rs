@@ -68,16 +68,17 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let rfp_text = rfp_text.clone();
 
             // Collect non-VPP PDF URLs for potential pass 2 (only actual PDFs, not .docx)
-            // Collect doc URLs + MIME types for potential PDF fallback (skip VPP)
+            // Collect doc URLs + MIME types for potential PDF fallback
+            // Skip VPP docs and non-PDF files (Gemini only supports PDF for fileData)
             let doc_urls: Vec<(String, String)> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
+                .filter(|doc| doc.filename.to_lowercase().ends_with(".pdf"))
                 .filter_map(|doc| {
                     let url = doc.pdf_url.clone()?;
                     if url.is_empty() { return None; }
-                    let mime = mime_from_filename(&doc.filename);
-                    Some((url, mime))
+                    Some((url, "application/pdf".to_string()))
                 })
                 .collect();
 
