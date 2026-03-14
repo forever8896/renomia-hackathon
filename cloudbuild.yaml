@@ -1,0 +1,36 @@
+steps:
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_AR_REPO}/${_SERVICE_NAME}:${COMMIT_SHA}'
+      - '.'
+    id: 'build'
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_AR_REPO}/${_SERVICE_NAME}:${COMMIT_SHA}'
+    id: 'push'
+    waitFor: ['build']
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        sed -e "s|__SERVICE_NAME__|${_SERVICE_NAME}|g" \
+            -e "s|__APP_IMAGE__|${_AR_REPO}/${_SERVICE_NAME}:${COMMIT_SHA}|g" \
+            -e "s|__GEMINI_API_KEY__|${_GEMINI_API_KEY}|g" \
+            -e "s|__PARTICIPANT_SA__|${_PARTICIPANT_SA}|g" \
+            service.yaml | \
+        gcloud run services replace - --region=${_REGION}
+    id: 'deploy'
+    waitFor: ['push']
+
+substitutions:
+  _SERVICE_NAME: 'challenge-2'
+  _REGION: 'europe-west1'
+  _AR_REPO: 'europe-west1-docker.pkg.dev/${PROJECT_ID}/hackathon'
+  _GEMINI_API_KEY: ''
+  _PARTICIPANT_SA: ''
