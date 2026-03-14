@@ -11,6 +11,8 @@ use gemini::GeminiClient;
 use normalizer::{is_vpp_document, normalize_ocr};
 
 const MAX_OCR_CHARS: usize = 800_000;
+/// Hard deadline for the entire solve — leave margin for ranking call
+const SOLVE_DEADLINE_SECS: u64 = 250;
 
 fn mime_from_filename(filename: &str) -> String {
     let lower = filename.to_lowercase();
@@ -40,6 +42,7 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
 }
 
 pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveResponse {
+    let start_time = std::time::Instant::now();
     let fields = &request.fields_to_extract;
     let field_types = &request.field_types;
     let segment = &request.segment;
@@ -167,6 +170,14 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     // === Pass 2: PDF fallback for offers with N/A fields ===
     let mut final_results: Vec<(String, String, HashMap<String, String>)> = Vec::new();
 
+    let elapsed = start_time.elapsed().as_secs();
+    let time_remaining = SOLVE_DEADLINE_SECS.saturating_sub(elapsed);
+    let skip_pdf = time_remaining < 60;
+
+    if skip_pdf {
+        warn!("Skipping PDF fallback — only {}s remaining (need 60s)", time_remaining);
+    }
+
     // Collect offers that need PDF fallback
     let mut pdf_tasks = Vec::new();
     let mut no_pdf_results = Vec::new();
@@ -177,7 +188,7 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             .filter(|v| matches!(v.as_str(), "N/A" | "Neuvedeno"))
             .count();
 
-        if missing_count > 0 && !doc_urls.is_empty() {
+        if missing_count > 0 && !doc_urls.is_empty() && !skip_pdf {
             let na_fields: Vec<String> = fields_map
                 .iter()
                 .filter(|(_, v)| matches!(v.as_str(), "N/A" | "Neuvedeno"))
