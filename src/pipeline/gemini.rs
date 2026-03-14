@@ -11,6 +11,7 @@ const EXTRACT_MODEL: &str = "gemini-2.5-pro";
 const RANK_MODEL: &str = "gemini-2.5-flash";
 const MAX_RETRIES: u32 = 4;
 const BATCH_SIZE: usize = 22;
+const MAX_PDF_SIZE: usize = 20_000_000; // 20MB limit for Gemini file upload
 
 pub struct GeminiClient {
     client: Client,
@@ -88,6 +89,60 @@ impl GeminiClient {
         }
 
         Err(format!("All {MAX_RETRIES} retries failed: {last_err}"))
+    }
+
+    /// Upload a PDF to Gemini File API, returns the file URI.
+    pub async fn upload_pdf(&self, pdf_bytes: &[u8]) -> Result<String, String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/upload/v1beta/files?key={}",
+            self.api_key
+        );
+
+        let resp = self.client.post(&url)
+            .header("X-Goog-Upload-Command", "start, upload, finalize")
+            .header("X-Goog-Upload-Header-Content-Length", pdf_bytes.len().to_string())
+            .header("X-Goog-Upload-Header-Content-Type", "application/pdf")
+            .header("Content-Type", "application/pdf")
+            .body(pdf_bytes.to_vec())
+            .send()
+            .await
+            .map_err(|e| format!("PDF upload failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("PDF upload HTTP {status}: {text}"));
+        }
+
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("PDF upload parse error: {e}"))?;
+
+        parsed.get("file")
+            .and_then(|f| f.get("uri"))
+            .and_then(|u| u.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("No URI in upload response: {text}"))
+    }
+
+    /// Download a PDF from a URL, returns the bytes.
+    pub async fn download_pdf(&self, url: &str) -> Result<Vec<u8>, String> {
+        let resp = self.client.get(url)
+            .send()
+            .await
+            .map_err(|e| format!("PDF download failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            return Err(format!("PDF download HTTP {}", resp.status()));
+        }
+
+        let bytes = resp.bytes().await
+            .map_err(|e| format!("PDF read failed: {e}"))?;
+
+        if bytes.len() > MAX_PDF_SIZE {
+            return Err(format!("PDF too large: {} bytes", bytes.len()));
+        }
+
+        Ok(bytes.to_vec())
     }
 
     fn extract_text_from_response(parsed: &Value) -> Result<String, String> {
@@ -193,6 +248,7 @@ Fields to extract:
         field_types: &HashMap<String, String>,
         documents_text: &str,
         rfp_text: Option<&str>,
+        pdf_uris: &[String], // Gemini file URIs for uploaded PDFs
     ) -> HashMap<String, String> {
         let fields_list: String = fields
             .iter()
@@ -228,7 +284,14 @@ Fields to extract:
             "temperature": 0.0,
         });
 
-        let contents = json!([{"parts": [{"text": prompt}]}]);
+        // Build parts: PDFs first, then text prompt
+        let mut parts = Vec::new();
+        for uri in pdf_uris {
+            parts.push(json!({"fileData": {"fileUri": uri, "mimeType": "application/pdf"}}));
+        }
+        parts.push(json!({"text": prompt}));
+
+        let contents = json!([{"parts": parts}]);
 
         match self.call_gemini(EXTRACT_MODEL, contents, generation_config).await {
             Ok(parsed) => {
@@ -247,8 +310,8 @@ Fields to extract:
         }
     }
 
-    /// Extract fields with automatic batching for large field lists
-    /// and two-pass N/A recovery.
+    /// Extract fields with automatic batching for large field lists,
+    /// PDF multimodal extraction, and two-pass N/A recovery.
     pub async fn extract_fields(
         &self,
         offer_id: &str,
@@ -258,16 +321,15 @@ Fields to extract:
         field_types: &HashMap<String, String>,
         documents_text: &str,
         rfp_text: Option<&str>,
+        pdf_uris: &[String],
     ) -> HashMap<String, String> {
         let mut all_results = HashMap::new();
 
         if fields.len() <= BATCH_SIZE {
-            // Single batch
             all_results = self.extract_fields_single_batch(
-                insurer, segment, fields, field_types, documents_text, rfp_text,
+                insurer, segment, fields, field_types, documents_text, rfp_text, pdf_uris,
             ).await;
         } else {
-            // Batch extraction: split into chunks, run in parallel
             let batches: Vec<&[String]> = fields.chunks(BATCH_SIZE).collect();
             info!("Batching {} fields into {} chunks for {}", fields.len(), batches.len(), offer_id);
 
@@ -275,7 +337,7 @@ Fields to extract:
                 .iter()
                 .map(|batch| {
                     self.extract_fields_single_batch(
-                        insurer, segment, batch, field_types, documents_text, rfp_text,
+                        insurer, segment, batch, field_types, documents_text, rfp_text, pdf_uris,
                     )
                 })
                 .collect();
@@ -294,14 +356,13 @@ Fields to extract:
             .collect();
 
         if !na_fields.is_empty() && na_fields.len() < fields.len() {
-            // Only retry if we got SOME results (not a total failure)
             info!(
                 "Pass 2: re-extracting {} N/A fields for {} (out of {})",
                 na_fields.len(), offer_id, fields.len()
             );
 
             let retry_results = self.extract_fields_single_batch(
-                insurer, segment, &na_fields, field_types, documents_text, rfp_text,
+                insurer, segment, &na_fields, field_types, documents_text, rfp_text, pdf_uris,
             ).await;
 
             for (field, value) in retry_results {
