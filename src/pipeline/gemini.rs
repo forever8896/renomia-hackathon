@@ -139,6 +139,123 @@ impl GeminiClient {
             .ok_or_else(|| format!("No URI in upload response: {text}"))
     }
 
+    /// Create a context cache for reuse across multiple extraction calls on the same document.
+    /// Returns the cache name (e.g., "cachedContents/abc123").
+    pub async fn create_context_cache(
+        &self,
+        documents_text: &str,
+        doc_uris: &[(String, String)],
+    ) -> Result<String, String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/cachedContents?key={}",
+            self.api_key
+        );
+
+        let system_instruction = Self::extraction_system_instruction();
+
+        let mut parts = Vec::new();
+        for (uri, mime) in doc_uris {
+            parts.push(json!({"fileData": {"fileUri": uri, "mimeType": mime}}));
+        }
+        parts.push(json!({"text": documents_text}));
+
+        let body = json!({
+            "model": format!("models/{}", EXTRACT_MODEL),
+            "contents": [{"role": "user", "parts": parts}],
+            "systemInstruction": {"parts": [{"text": system_instruction}]},
+            "ttl": "600s"
+        });
+
+        let resp = self.client.post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Cache creation failed: {e}"))?;
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(format!("Cache creation HTTP {status}: {}", &text[..text.len().min(200)]));
+        }
+
+        let parsed: Value = serde_json::from_str(&text)
+            .map_err(|e| format!("Cache parse error: {e}"))?;
+
+        parsed.get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("No name in cache response"))
+    }
+
+    /// Call Gemini using a cached context (for batched extraction on same document).
+    async fn call_gemini_cached(
+        &self,
+        cache_name: &str,
+        contents: Value,
+        generation_config: Value,
+    ) -> Result<Value, String> {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            EXTRACT_MODEL, self.api_key
+        );
+
+        let body = json!({
+            "cachedContent": cache_name,
+            "contents": contents,
+            "generationConfig": generation_config,
+        });
+
+        let mut last_err = String::new();
+        for attempt in 0..MAX_RETRIES {
+            if attempt > 0 {
+                let delay = 1u64 << attempt;
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            }
+
+            let resp = self.client.post(&url).json(&body).send().await;
+            match resp {
+                Ok(r) => {
+                    let status = r.status();
+                    let resp_text = r.text().await.unwrap_or_default();
+
+                    if status == 429 || status == 503 {
+                        warn!("Gemini cached {status}, attempt {attempt}, retrying...");
+                        last_err = format!("HTTP {status}");
+                        continue;
+                    }
+
+                    if !status.is_success() {
+                        last_err = format!("HTTP {status}: {}", &resp_text[..resp_text.len().min(300)]);
+                        error!("Gemini cached error: {last_err}");
+                        if status.is_server_error() { continue; }
+                        return Err(last_err);
+                    }
+
+                    let parsed: Value = serde_json::from_str(&resp_text)
+                        .map_err(|e| format!("JSON parse error: {e}"))?;
+
+                    if let Some(usage) = parsed.get("usageMetadata") {
+                        let prompt_tokens = usage.get("promptTokenCount")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        let completion_tokens = usage.get("candidatesTokenCount")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        let thoughts_tokens = usage.get("thoughtsTokenCount")
+                            .and_then(|v| v.as_u64()).unwrap_or(0);
+                        self.metrics.add(prompt_tokens, completion_tokens + thoughts_tokens);
+                    }
+
+                    return Ok(parsed);
+                }
+                Err(e) => {
+                    last_err = format!("Request error: {e}");
+                    warn!("Gemini cached request failed: {last_err}, attempt {attempt}");
+                }
+            }
+        }
+
+        Err(format!("All {MAX_RETRIES} retries failed: {last_err}"))
+    }
+
     /// Download a PDF from a URL, returns the bytes.
     pub async fn download_pdf(&self, url: &str) -> Result<Vec<u8>, String> {
         let resp = self.client.get(url)
@@ -357,6 +474,81 @@ Fields to extract:
         }
     }
 
+    /// Extract fields using a cached context (document text already stored in cache).
+    async fn extract_fields_cached(
+        &self,
+        cache_name: &str,
+        insurer: &str,
+        segment: &str,
+        fields: &[String],
+        field_types: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let fields_list: String = fields
+            .iter()
+            .map(|f| {
+                let ftype = field_types.get(f).map(|s| s.as_str()).unwrap_or("string");
+                format!("- {} (type: {})", f, ftype)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Only send the task prompt — document is in cache
+        let prompt = format!(
+            "TASK: Extract these fields from the insurance offer by \"{insurer}\" in the \"{segment}\" segment.\n\nFields to extract:\n{fields_list}"
+        );
+
+        let mut properties = serde_json::Map::new();
+        let mut required = vec!["reasoning".to_string()];
+        let mut property_ordering = vec!["reasoning".to_string()];
+        properties.insert(
+            "reasoning".to_string(),
+            json!({"type": "STRING", "description": "Brief reasoning about what you found"}),
+        );
+        for field in fields {
+            let ftype = field_types.get(field).map(|s| s.as_str()).unwrap_or("string");
+            let description = if ftype == "number" {
+                "Numeric value as plain digits"
+            } else {
+                "Text value, use Ano/Ne for boolean fields"
+            };
+            properties.insert(field.clone(), json!({"type": "STRING", "description": description}));
+            required.push(field.clone());
+            property_ordering.push(field.clone());
+        }
+
+        let response_schema = json!({
+            "type": "OBJECT",
+            "properties": properties,
+            "required": required,
+            "propertyOrdering": property_ordering,
+        });
+
+        let generation_config = json!({
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+            "temperature": 0.0,
+            "thinkingConfig": {"thinkingBudget": 2048},
+        });
+
+        let contents = json!([{"parts": [{"text": prompt}]}]);
+
+        match self.call_gemini_cached(cache_name, contents, generation_config).await {
+            Ok(parsed) => {
+                match Self::extract_text_from_response(&parsed) {
+                    Ok(text) => Self::parse_extraction_response(&text, fields),
+                    Err(e) => {
+                        error!("No text in cached extraction response: {e}");
+                        fields.iter().map(|f| (f.clone(), "N/A".to_string())).collect()
+                    }
+                }
+            }
+            Err(e) => {
+                error!("Cached extraction failed: {e}");
+                fields.iter().map(|f| (f.clone(), "N/A".to_string())).collect()
+            }
+        }
+    }
+
     /// Extract fields with automatic batching for large field lists,
     /// PDF multimodal extraction, and two-pass N/A recovery.
     pub async fn extract_fields(
@@ -378,20 +570,44 @@ Fields to extract:
             ).await;
         } else {
             let batches: Vec<&[String]> = fields.chunks(BATCH_SIZE).collect();
-            info!("Batching {} fields into {} chunks for {}", fields.len(), batches.len(), offer_id);
+            info!("Batching {} fields into {} chunks for {} — trying context cache", fields.len(), batches.len(), offer_id);
 
-            let batch_futures: Vec<_> = batches
-                .iter()
-                .map(|batch| {
-                    self.extract_fields_single_batch(
-                        insurer, segment, batch, field_types, documents_text, rfp_text, doc_uris,
-                    )
-                })
-                .collect();
+            // Try to create a context cache for this document (saves re-sending 800K text per batch)
+            let cache_name = self.create_context_cache(documents_text, doc_uris).await.ok();
+            if let Some(ref name) = cache_name {
+                info!("Created context cache for {}: {}", offer_id, name);
+            }
 
-            let batch_results = futures::future::join_all(batch_futures).await;
-            for result in batch_results {
-                all_results.extend(result);
+            if let Some(ref cache_name) = cache_name {
+                // Use cached context — only send the field-specific prompt per batch
+                let batch_futures: Vec<_> = batches
+                    .iter()
+                    .map(|batch| {
+                        self.extract_fields_cached(
+                            cache_name, insurer, segment, batch, field_types,
+                        )
+                    })
+                    .collect();
+
+                let batch_results = futures::future::join_all(batch_futures).await;
+                for result in batch_results {
+                    all_results.extend(result);
+                }
+            } else {
+                // Fallback: send full document per batch (no cache)
+                let batch_futures: Vec<_> = batches
+                    .iter()
+                    .map(|batch| {
+                        self.extract_fields_single_batch(
+                            insurer, segment, batch, field_types, documents_text, rfp_text, doc_uris,
+                        )
+                    })
+                    .collect();
+
+                let batch_results = futures::future::join_all(batch_futures).await;
+                for result in batch_results {
+                    all_results.extend(result);
+                }
             }
         }
 
