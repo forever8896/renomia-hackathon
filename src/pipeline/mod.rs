@@ -61,8 +61,9 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     // === Cross-offer document attribution ===
     // Build an index: for each insurer name, find documents from OTHER offers
     // that mention this insurer prominently (broker/underwriter mismatch detection)
-    let mut cross_ref_docs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // offer_id -> [(filename, normalized_text)]
-    let mut cross_ref_pdfs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // offer_id -> [(url, mime)]
+    let mut cross_ref_docs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // dest_offer_id -> [(filename, normalized_text)]
+    let mut cross_ref_pdfs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // dest_offer_id -> [(url, mime)]
+    let mut reassigned_docs: HashMap<String, Vec<String>> = HashMap::new(); // source_offer_id -> [filenames moved away]
 
     // Only cross-reference for offers that have very little own content
     let sparse_offers: Vec<String> = request.offers.iter()
@@ -103,6 +104,11 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                         .entry(offer.id.clone())
                         .or_default()
                         .push((doc.filename.clone(), normalized));
+                    // Track that this doc was moved away from the source offer
+                    reassigned_docs
+                        .entry(other_offer.id.clone())
+                        .or_default()
+                        .push(doc.filename.clone());
 
                     // Also grab the PDF URL if it's a .pdf
                     if doc.filename.to_lowercase().ends_with(".pdf") {
@@ -132,11 +138,18 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let field_types = field_types.clone();
             let rfp_text = rfp_text.clone();
 
-            // Collect PDF URLs: own docs + cross-referenced docs
+            // Get list of docs that were reassigned AWAY from this offer
+            let moved_away: Vec<String> = reassigned_docs
+                .get(&offer_id)
+                .cloned()
+                .unwrap_or_default();
+
+            // Collect PDF URLs: own docs (minus reassigned) + cross-referenced docs
             let mut doc_urls: Vec<(String, String)> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
+                .filter(|doc| !moved_away.contains(&doc.filename))
                 .filter(|doc| doc.filename.to_lowercase().ends_with(".pdf"))
                 .filter_map(|doc| {
                     let url = doc.pdf_url.clone()?;
@@ -155,6 +168,11 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
 
             for doc in &offer.documents {
                 if doc.ocr_text.is_empty() {
+                    continue;
+                }
+                // Skip docs that were reassigned to another offer
+                if moved_away.contains(&doc.filename) {
+                    info!("Skipping reassigned doc '{}' from offer {}", doc.filename, offer_id);
                     continue;
                 }
                 let normalized = normalize_ocr(&doc.ocr_text);
