@@ -305,16 +305,26 @@ impl GeminiClient {
 
 CRITICAL RULES:
 1. For NUMBER type fields: return ONLY the plain numeric value as digits (e.g. "34851", "150000000", "5000"). Remove currency symbols (Kč, CZK, EUR, €), spaces, dots/commas used as thousands separators. Keep decimal points for fractional values (e.g. "459.35"). If the value contains a percentage or formula like "3 % / min. CZK 3 000", return it as-is since it's not a pure number.
-2. For STRING type fields:
-   - Include relevant qualifiers that add information: deductible amounts, conditions, prices for add-ons
-   - Examples of GOOD answers: "Ano, se spoluúčastí CZK 1,000", "Ne (lze připojistit za CZK 1 485)", "Ano (jen řidič)", "Ne, pouze připojištění", "Volba servisu, sleva CZK 3,000"
-   - Do NOT add product variant names or marketing labels: return "Allrisk" not "Allrisk (Varianta Max)", return "Ano" not "Ano (součást balíčku)"
-   - When coverage is optional/add-on, always include the price if mentioned: "Ne (lze připojistit za CZK 1 485)" not just "Ne (lze připojistit)"
-3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort when the field topic is completely absent from all documents.
-   IMPORTANT: Do NOT assume "Allrisk" covers everything. Check the actual document for each coverage:
-   - Some Allrisk packages EXCLUDE certain coverages (e.g. skla, střet se zvěří may need separate add-on)
-   - If a coverage is listed as optional/add-on even within Allrisk, answer "Ne (lze připojistit)" or "Ne, pouze připojištění"
-   - Only answer "Ano" for coverages explicitly listed as included in the offer
+2. For STRING type fields — follow these format rules EXACTLY:
+   a) For coverage yes/no: Include qualifying details (deductible, price, condition) when present in the document.
+      GOOD: "Ano, se spoluúčastí CZK 1,000" | "Ne (lze připojistit za CZK 1 485)" | "Ano (jen řidič)" | "Ne, pouze připojištění" | "Volitelné připojištění"
+      BAD: just "Ano" or "Ne" when the doc has more detail
+   b) For ranges/limits: use concise format with "–" for ranges: "CZK 10,000–50,000" or "30 min / 50–100 km"
+   c) For Typ havarijního pojištění: use "Allrisk" (not variant names). If GAP is also included, use "Allrisk + GAP"
+   d) For Rozsah servisu: prefer terms like "Volba servisu" or "Povinné smluvní servisy" over brand names
+   e) For Asistenční služby – rozsah: use concise format like "Rozšířená asistence" or "30 min / 50–100 km" or "CZK 2 500 / CZK 5 000" (limits)
+   f) For Počet zásahů asistence: use "Neomezeno" or "Omezeno" — not detailed descriptions
+   g) Do NOT add product variant names, marketing labels, or article references: "Allrisk" not "Allrisk (Varianta Max)", "Ano" not "Ano (dle RGL4)"
+   h) When coverage is optional/add-on, ALWAYS include the price: "Ne (lze připojistit za CZK 1 485)" not just "Ne (lze připojistit)"
+   i) Přímá likvidace: answer "Ano" or "Ne (lze připojistit)" — not brand names
+   j) Úrazové pojištění: if included for driver only, use "Ano (jen řidič)"
+3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort.
+   For Allrisk packages: check the SPECIFIC offer document for what's included vs optional:
+   - If the document lists a coverage as included or part of the package → "Ano" (with qualifier if relevant)
+   - If listed as optional add-on with a price → "Ne (lze připojistit za CZK X)"
+   - If listed as only an add-on without details → "Ne, pouze připojištění"
+   - Přímá likvidace / pojištění nezaviněné nehody are typically included → "Ano"
+   - Úrazové pojištění for driver is often included → "Ano (jen řidič)"
 4. Search ALL text carefully — values may be in tables, lists, footnotes, summaries, appendices, or scattered across sections. Documents may be in Czech, English, or German.
 5. MOST CRITICAL — PREMIUMS vs COVERAGE LIMITS:
    When the field list contains cost-related fields together (pojistné, CELKEM, Sleva, pojistné před slevou), then bare insurance product names as fields refer to the PREMIUM (cost) for that product, NOT the coverage limit:
