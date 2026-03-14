@@ -116,8 +116,16 @@ pub fn deterministic_rank(
         .collect();
 
     ranked.sort_by(|a, b| {
-        b.1.cmp(&a.1) // more wins = better
-            .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)) // lower premium as tiebreaker
+        // Treat win counts within 2 as a tie — use premium as primary differentiator
+        let win_diff = (b.1 as i64) - (a.1 as i64);
+        if win_diff.abs() <= 2 {
+            // Close in wins — lower premium wins
+            a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.1.cmp(&a.1))
+        } else {
+            b.1.cmp(&a.1)
+                .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+        }
     });
 
     ranked.into_iter().map(|(id, _, _)| id.to_string()).collect()
