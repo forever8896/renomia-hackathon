@@ -16,6 +16,7 @@ Build a `/solve` REST endpoint in **Rust** that receives OCR-extracted text from
 - Challenge 3 (Vehicle Pricing >3.5t): https://github.com/jiriem/renomia-hackathon-challenge-3
 
 ### Training Database (read-only)
+- See `.env.training` for credentials (not committed to git)
 - Tables: `challenges` (3 rows), `training_data` (63 rows — 2 rows for challenge_id=2)
 
 ### GCS Bucket (training documents, read-only)
@@ -33,6 +34,36 @@ Build a `/solve` REST endpoint in **Rust** that receives OCR-extracted text from
 - Scaling: 1–3 replicas, 80 concurrent requests, 300s timeout
 - PostgreSQL sidecar container for caching
 - CI/CD: `cloudbuild.yaml` → Docker build → push to Artifact Registry → deploy via `gcloud run services replace`
+
+---
+
+## Required API Contract (from template repo)
+
+The platform evaluator expects these exact endpoints:
+
+### Endpoints
+- `GET /` → `{"status": "ok"}` — Knative startup probe, must respond on port 8080
+- `GET /metrics` → `{"gemini_request_count": N, "prompt_tokens": N, "completion_tokens": N, "total_tokens": N}`
+- `POST /metrics/reset` → resets all counters, returns `{"status": "reset"}`
+- `POST /solve` → main extraction endpoint (see schemas below)
+
+### Environment Variables
+- `GEMINI_API_KEY` — Gemini API key (provided at deploy time)
+- `DATABASE_URL` — PostgreSQL connection string (default: `postgresql://hackathon:hackathon@localhost:5432/hackathon`)
+
+### Deployment Config (must preserve)
+- `service.yaml` — Knative multi-container: app (port 8080, 512Mi/1CPU) + PostgreSQL sidecar (256Mi/0.5CPU)
+- `cloudbuild.yaml` — 3-step pipeline: docker build → push to Artifact Registry → deploy via `gcloud run services replace`
+- `docker-compose.yml` — local dev: app + PostgreSQL 15 Alpine
+- `init.sql` — creates `cache` table (key TEXT, value JSONB) — ephemeral, lost on scale-to-zero
+- PostgreSQL sidecar is required by the platform even if we don't use it for caching
+
+### Resource Limits
+- App container: 512Mi memory, 1 CPU
+- PostgreSQL sidecar: 256Mi memory, 0.5 CPU
+- Scaling: min 1, max 3 replicas
+- Concurrency: 80 requests per instance
+- Timeout: 300s per request
 
 ---
 
