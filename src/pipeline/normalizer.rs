@@ -97,6 +97,87 @@ pub fn extract_value_summary(text: &str) -> String {
     summary
 }
 
+/// For each field to extract, find relevant text snippets by keyword matching.
+/// Returns a focused "field hints" section to prepend before the raw text.
+pub fn extract_field_hints(text: &str, fields: &[String]) -> String {
+    let text_lower = text.to_lowercase();
+    let mut hints = Vec::new();
+
+    for field in fields {
+        let field_lower = field.to_lowercase();
+
+        // Generate search terms from field name
+        let search_terms: Vec<&str> = field_lower
+            .split(|c: char| c == ' ' || c == '–' || c == '-' || c == ':')
+            .filter(|s| s.len() > 3)
+            .collect();
+
+        if search_terms.is_empty() {
+            continue;
+        }
+
+        // Find the best matching position in text
+        let mut best_pos = None;
+        let mut best_score = 0;
+
+        // Try to find the full field name first
+        if let Some(pos) = text_lower.find(&field_lower) {
+            best_pos = Some(pos);
+            best_score = 100;
+        }
+
+        // Try partial matches if full match not found
+        if best_score < 100 {
+            for (i, _) in text_lower.match_indices(search_terms[0]) {
+                let window: String = text_lower[i..std::cmp::min(i + 200, text_lower.len())].to_string();
+                let score: usize = search_terms.iter()
+                    .filter(|t| window.contains(*t))
+                    .count();
+                if score > best_score {
+                    best_score = score;
+                    best_pos = Some(i);
+                }
+            }
+        }
+
+        // Extract context around the match (use text_lower for positions, it has same byte layout)
+        if let Some(pos) = best_pos {
+            if best_score >= 1 {
+                let start = if pos > 100 { pos - 100 } else { 0 };
+                let end = std::cmp::min(pos + 300, text_lower.len());
+                // Find safe char boundaries on text_lower (same byte positions)
+                let start = {
+                    let mut s = start;
+                    while s > 0 && !text_lower.is_char_boundary(s) { s -= 1; }
+                    s
+                };
+                let end = {
+                    let mut e = end;
+                    while e < text_lower.len() && !text_lower.is_char_boundary(e) { e += 1; }
+                    std::cmp::min(e, text_lower.len())
+                };
+                // Use text_lower for the snippet (safe boundaries guaranteed)
+                let snippet = text_lower[start..end].replace('\n', " ").trim().to_string();
+                if snippet.len() > 20 {
+                    hints.push(format!("[{}] ...{}...", field, snippet));
+                }
+            }
+        }
+    }
+
+    if hints.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::from("=== FIELD-RELEVANT TEXT SNIPPETS ===\n");
+    for hint in hints.iter().take(40) {
+        result.push_str(hint);
+        result.push('\n');
+    }
+    result.push_str("=== END SNIPPETS ===\n\n");
+    result
+}
+
 /// Returns true if the filename looks like a VPP / general conditions document.
 pub fn is_vpp_document(filename: &str) -> bool {
     let lower = filename.to_lowercase();
