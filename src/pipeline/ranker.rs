@@ -74,7 +74,12 @@ pub fn deterministic_rank(
             };
 
             if let Some(winner) = best_id {
-                *win_counts.entry(winner).or_insert(0) += 1;
+                // Only award if there's actual differentiation (not all same value)
+                let valid_vals: Vec<f64> = parsed.iter().filter_map(|(_, v)| *v).collect();
+                let all_same = valid_vals.len() > 1 && valid_vals.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01);
+                if !all_same {
+                    *win_counts.entry(winner).or_insert(0) += 1;
+                }
             }
         } else {
             // String field: score each value
@@ -87,8 +92,9 @@ pub fn deterministic_rank(
                 .collect();
 
             let best_score = scored.iter().map(|(_, s)| *s).max().unwrap_or(0);
-            if best_score > 0 {
-                // Award win to all offers tied at the best score
+            let winners_count = scored.iter().filter(|(_, s)| *s == best_score).count();
+            // Only award wins when there's a clear winner (not everyone tied)
+            if best_score > 0 && winners_count < scored.len() {
                 for (id, score) in &scored {
                     if *score == best_score {
                         *win_counts.entry(id).or_insert(0) += 1;
