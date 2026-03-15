@@ -5,13 +5,13 @@ mod pipeline;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
-use tracing::info;
+use tracing::{error, info};
 
 use metrics::{Metrics, RequestLog};
 use models::{SolveRequest, StatusResponse};
@@ -76,8 +76,18 @@ async fn reset_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
 async fn solve(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<SolveRequest>,
+    payload: Result<Json<SolveRequest>, JsonRejection>,
 ) -> impl IntoResponse {
+    let Json(request) = match payload {
+        Ok(json) => json,
+        Err(rejection) => {
+            error!("Failed to parse /solve request: {rejection}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{rejection}")})),
+            );
+        }
+    };
     let segment = request.segment.clone();
     let num_offers = request.offers.len();
     let num_fields = request.fields_to_extract.len();
@@ -110,7 +120,7 @@ async fn solve(
     );
 
     state.metrics.log_request(log);
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
 }
 
 async fn get_analytics(State(state): State<Arc<AppState>>) -> impl IntoResponse {

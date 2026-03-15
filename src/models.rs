@@ -3,35 +3,50 @@ use std::collections::HashMap;
 
 #[derive(Debug, Deserialize)]
 pub struct SolveRequest {
+    #[serde(default)]
     pub segment: String,
+    #[serde(default)]
     pub fields_to_extract: Vec<String>,
+    #[serde(default)]
     pub field_types: HashMap<String, String>,
+    #[serde(default)]
     pub offers: Vec<OfferInput>,
+    #[serde(default)]
     pub rfp: Option<RfpDocument>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct OfferInput {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub insurer: String,
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub documents: Vec<Document>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct Document {
+    #[serde(default)]
     pub filename: String,
+    #[serde(default)]
     pub ocr_text: String,
+    #[serde(default)]
     pub pdf_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct RfpDocument {
+    #[serde(default)]
     pub filename: String,
+    #[serde(default)]
     pub ocr_text: String,
+    #[serde(default)]
     pub pdf_url: Option<String>,
 }
 
