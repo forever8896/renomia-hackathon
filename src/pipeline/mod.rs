@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::models::{OfferParsed, SolveRequest, SolveResponse};
 use gemini::GeminiClient;
-use normalizer::{is_vpp_document, normalize_ocr};
+use normalizer::{extract_value_summary, is_vpp_document, normalize_ocr};
 
 const MAX_DOC_CHARS: usize = 200_000;
 /// Hard deadline for the entire solve — leave margin for ranking
@@ -189,6 +189,12 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                         combined.truncate(end);
                     }
 
+                    // Prepend value summary to help LLM locate key numbers
+                    let summary = extract_value_summary(&combined);
+                    if !summary.is_empty() {
+                        combined = format!("{}{}", summary, combined);
+                    }
+
                     let result = gemini.extract_fields(
                         &offer_id, &insurer, &segment,
                         &fields, &field_types,
@@ -207,7 +213,8 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                                 let end = floor_char_boundary(&doc_text, MAX_DOC_CHARS);
                                 doc_text.truncate(end);
                             }
-                            format!("\n=== Document: {} ===\n{}", filename, doc_text)
+                            let summary = extract_value_summary(&doc_text);
+                            format!("{}\n=== Document: {} ===\n{}", summary, filename, doc_text)
                         })
                         .collect();
 

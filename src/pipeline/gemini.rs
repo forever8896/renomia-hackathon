@@ -535,6 +535,8 @@ Search the ENTIRE document carefully for each of these fields:
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
             "temperature": 0.0,
+            "topP": 1.0,
+            "seed": 42,
             "thinkingConfig": {"thinkingBudget": thinking_budget},
         });
 
