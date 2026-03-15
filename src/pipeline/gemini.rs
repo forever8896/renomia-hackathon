@@ -500,7 +500,13 @@ Search the ENTIRE document carefully for each of these fields:
                             _ => None,
                         })
                         .unwrap_or_else(|| "N/A".to_string());
-                    result.insert(field.clone(), val);
+                    // Post-processing: if a value looks like another field name, it's a schema confusion
+                    let is_field_name = fields.iter().any(|f| f != field && val == *f);
+                    if is_field_name {
+                        result.insert(field.clone(), "N/A".to_string());
+                    } else {
+                        result.insert(field.clone(), val);
+                    }
                 }
                 result
             }
