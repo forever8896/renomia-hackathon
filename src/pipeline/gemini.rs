@@ -525,11 +525,16 @@ Fields to extract:
             "propertyOrdering": property_ordering,
         });
 
+        // Scale thinking budget with document size — more text needs more reasoning
+        let thinking_budget = if documents_text.len() > 100_000 { 8192 }
+            else if documents_text.len() > 30_000 { 4096 }
+            else { 2048 };
+
         let generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
             "temperature": 0.0,
-            "thinkingConfig": {"thinkingBudget": 2048},
+            "thinkingConfig": {"thinkingBudget": thinking_budget},
         });
 
         // Build parts: documents first, then text prompt
@@ -605,11 +610,12 @@ Fields to extract:
             "propertyOrdering": property_ordering,
         });
 
+        // Cached calls are for large docs (odpovědnost) — use higher thinking budget
         let generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
             "temperature": 0.0,
-            "thinkingConfig": {"thinkingBudget": 2048},
+            "thinkingConfig": {"thinkingBudget": 8192},
         });
 
         let contents = json!([{"parts": [{"text": prompt}]}]);
