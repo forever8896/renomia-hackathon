@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f0f0f0; }
+
+  @page {
+    size: 1920px 1080px;
+    margin: 0;
+  }
+
+  .slide {
+    width: 1920px; height: 1080px;
+    background: white;
+    margin: 0 auto 20px auto;
+    padding: 70px 90px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+    position: relative;
+    overflow: hidden;
+    page-break-after: always;
+    page-break-inside: avoid;
+  }
+
+  @media print {
+    body { background: white; }
+    .slide { box-shadow: none; margin: 0; }
+  }
+
+  .slide::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 8px;
+    background: linear-gradient(90deg, #1a56db, #3b82f6, #60a5fa);
+  }
+
+  .slide-number {
+    position: absolute;
+    bottom: 30px; right: 45px;
+    font-size: 20px;
+    color: #94a3b8;
+  }
+
+  .team-tag {
+    position: absolute;
+    bottom: 30px; left: 45px;
+    font-size: 20px;
+    color: #94a3b8;
+  }
+
+  h1 { font-size: 46px; color: #1e293b; margin-bottom: 10px; font-weight: 700; }
+  h2 { font-size: 32px; color: #1a56db; margin-bottom: 20px; font-weight: 600; }
+  h3 { font-size: 24px; color: #334155; margin-bottom: 12px; font-weight: 600; }
+
+  .subtitle { font-size: 26px; color: #64748b; margin-bottom: 40px; }
+
+  .two-col { display: flex; gap: 60px; }
+  .col { flex: 1; }
+
+  .pipeline {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 24px 30px;
+    margin-bottom: 20px;
+    font-size: 20px;
+    line-height: 1.7;
+  }
+
+  .pipeline-step {
+    display: flex;
+    align-items: flex-start;
+    margin-bottom: 10px;
+  }
+
+  .step-num {
+    background: #1a56db;
+    color: white;
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    font-weight: 700;
+    margin-right: 14px;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+
+  .step-text { font-size: 19px; color: #334155; }
+  .step-text strong { color: #1e293b; }
+  .step-detail { color: #64748b; font-size: 16px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 19px; }
+  th { background: #1a56db; color: white; padding: 10px 16px; text-align: left; font-weight: 600; }
+  td { padding: 9px 16px; border-bottom: 1px solid #e2e8f0; }
+  tr:nth-child(even) { background: #f8fafc; }
+
+  .metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 18px;
+    margin-bottom: 30px;
+  }
+
+  .metric-card {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+  }
+
+  .metric-value {
+    font-size: 42px;
+    font-weight: 700;
+    color: #1a56db;
+  }
+
+  .metric-label {
+    font-size: 15px;
+    color: #64748b;
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .tag {
+    display: inline-block;
+    background: #dbeafe;
+    color: #1a56db;
+    padding: 3px 10px;
+    border-radius: 5px;
+    font-size: 16px;
+    font-weight: 600;
+    margin-right: 6px;
+  }
+
+  .tag-green {
+    background: #dcfce7;
+    color: #15803d;
+  }
+
+  .research-list {
+    font-size: 18px;
+    line-height: 1.8;
+    color: #334155;
+  }
+
+  .research-list li {
+    margin-bottom: 6px;
+    list-style: none;
+    padding-left: 24px;
+    position: relative;
+  }
+
+  .research-list li::before {
+    content: '>';
+    position: absolute;
+    left: 0;
+    color: #1a56db;
+    font-weight: 700;
+  }
+
+  .highlight { color: #1a56db; font-weight: 700; }
+  .score-perfect { color: #15803d; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- SLIDE 1: Architecture -->
+<div class="slide" id="slide1">
+  <h1>Challenge 1: Insurance Offer Comparison</h1>
+  <div class="subtitle">Team Kilian &mdash; Built in Rust with Gemini 3.1 Flash Lite</div>
+
+  <div class="two-col">
+    <div class="col">
+      <h3>Extraction Pipeline</h3>
+      <div class="pipeline">
+        <div class="pipeline-step">
+          <div class="step-num">1</div>
+          <div class="step-text">
+            <strong>OCR Pre-processing</strong><br>
+            <span class="step-detail">Unicode NFC, LaTeX artifacts, regex monetary value pre-scan, cross-offer document attribution</span>
+          </div>
+        </div>
+        <div class="pipeline-step">
+          <div class="step-num">2</div>
+          <div class="step-text">
+            <strong>Adaptive Extraction</strong><br>
+            <span class="step-detail">Concatenated (&lt;200K) for cross-doc context, MapReduce (&gt;200K) to avoid "Lost in the Middle"</span>
+          </div>
+        </div>
+        <div class="pipeline-step">
+          <div class="step-num">3</div>
+          <div class="step-text">
+            <strong>Dual-Call Ensemble</strong><br>
+            <span class="step-detail">2 concurrent calls (temp 0.0 + 0.15), merge non-N/A values. Fills 5-10% gaps from MoE variance</span>
+          </div>
+        </div>
+        <div class="pipeline-step">
+          <div class="step-num">4</div>
+          <div class="step-text">
+            <strong>PDF Multimodal Fallback</strong><br>
+            <span class="step-detail">Download original PDFs, upload to Gemini File API, recover OCR-invisible table data</span>
+          </div>
+        </div>
+        <div class="pipeline-step">
+          <div class="step-num">5</div>
+          <div class="step-text">
+            <strong>Deterministic Ranking</strong><br>
+            <span class="step-detail">Field-by-field comparison in Rust. Zero LLM variance, zero latency, zero extra tokens</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="col">
+      <h3>Why Rust?</h3>
+      <div style="font-size: 20px; color: #334155; line-height: 1.7; margin-bottom: 16px;">
+        Only Rust solution in the hackathon. &lt;1s cold start, ~30MB memory (6% of 512Mi limit), zero GC pauses. Optimal for Cloud Run scale-to-zero.
+      </div>
+
+      <h3>Key Gemini API Features</h3>
+      <div style="font-size: 18px; color: #334155; line-height: 1.8;">
+        <span class="tag">system_instruction</span> <span class="tag">responseSchema</span> <span class="tag">propertyOrdering</span><br>
+        <span class="tag">thinkingConfig</span> <span class="tag">seed</span> <span class="tag">File API</span><br><br>
+        Per-field schema descriptions guide extraction format (15+ field patterns). Few-shot examples in system prompt. No schema duplication per Google recommendation.
+      </div>
+
+      <h3 style="margin-top: 16px;">Novel Techniques</h3>
+      <div style="font-size: 18px; color: #334155; line-height: 1.8;">
+        &bull; <strong>Cross-offer attribution</strong> &mdash; detects broker/underwriter doc mismatches<br>
+        &bull; <strong>Regex value pre-scan</strong> &mdash; monetary value summary prepended to text<br>
+        &bull; <strong>Mixed temperature ensemble</strong> &mdash; precision + diversity in parallel
+      </div>
+    </div>
+  </div>
+  <div class="team-tag">Team Kilian | github.com/jiriem/hackathon-2026-team-kilian</div>
+  <div class="slide-number">1 / 3</div>
+</div>
+
+<!-- SLIDE 2: KPIs & Results -->
+<div class="slide" id="slide2">
+  <h1>Performance & KPIs</h1>
+  <div class="subtitle">Measured against training data (3 segments, 99 fields total)</div>
+
+  <div class="metric-grid">
+    <div class="metric-card">
+      <div class="metric-value">0.76</div>
+      <div class="metric-label">Average Score</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">63s</div>
+      <div class="metric-label">Response Time</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">676K</div>
+      <div class="metric-label">Tokens / Eval</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">100%</div>
+      <div class="metric-label">Best Offer Correct</div>
+    </div>
+  </div>
+
+  <div class="two-col">
+    <div class="col">
+      <h3>Per-Segment Scores</h3>
+      <table>
+        <tr><th>Segment</th><th>Score</th><th>Fields</th><th>Ranking</th><th>Best</th></tr>
+        <tr><td><strong>auta</strong> (17 fields)</td><td class="highlight">0.89</td><td>82%</td><td class="score-perfect">100%</td><td class="score-perfect">100%</td></tr>
+        <tr><td><strong>lode</strong> (16 fields)</td><td class="highlight">0.81</td><td>69%</td><td class="score-perfect">100%</td><td class="score-perfect">100%</td></tr>
+        <tr><td><strong>odpovednost</strong> (66 fields)</td><td class="highlight">0.58</td><td>35%</td><td>88%</td><td class="score-perfect">100%</td></tr>
+      </table>
+
+      <h3 style="margin-top: 20px;">Resource Efficiency</h3>
+      <table>
+        <tr><th>Metric</th><th>Value</th><th>Limit</th><th>Usage</th></tr>
+        <tr><td>Response time</td><td>63s</td><td>300s</td><td>21%</td></tr>
+        <tr><td>Memory</td><td>~30MB</td><td>512Mi</td><td>6%</td></tr>
+        <tr><td>Gemini calls</td><td>42</td><td>&mdash;</td><td>&mdash;</td></tr>
+      </table>
+    </div>
+    <div class="col">
+      <h3>Optimization Journey</h3>
+      <table>
+        <tr><th>Stage</th><th>Score</th><th>Key Change</th></tr>
+        <tr><td>Initial</td><td>0.54</td><td>Gemini 2.0 Flash, basic prompt</td></tr>
+        <tr><td>+ System instructions</td><td>0.60</td><td>Persona, thinking mode</td></tr>
+        <tr><td>+ Cross-offer attribution</td><td>0.63</td><td>Broker/underwriter fix</td></tr>
+        <tr><td>+ MapReduce</td><td>0.65</td><td>Lost-in-Middle avoidance</td></tr>
+        <tr><td>+ Gemini 3.1 Flash Lite</td><td>0.75</td><td>Latest model (12 days old)</td></tr>
+        <tr><td><strong>+ Ensemble + few-shot</strong></td><td class="highlight"><strong>0.76</strong></td><td>Dual-call, temp diversity</td></tr>
+      </table>
+
+      <div style="margin-top: 16px; font-size: 18px; color: #64748b;">
+        <strong>+40% improvement</strong> from start to final through systematic, research-driven iteration across 30+ commits.
+      </div>
+    </div>
+  </div>
+  <div class="team-tag">Team Kilian | github.com/jiriem/hackathon-2026-team-kilian</div>
+  <div class="slide-number">2 / 3</div>
+</div>
+
+<!-- SLIDE 3: Why This Approach -->
+<div class="slide" id="slide3">
+  <h1>Why This Is The Best Approach</h1>
+  <div class="subtitle">Research-driven architecture with cutting-edge model selection</div>
+
+  <div class="two-col">
+    <div class="col">
+      <h3>Research-Backed Decisions</h3>
+      <ul class="research-list">
+        <li><strong>MapReduce extraction</strong> &mdash; "Lost in the Middle" paper (arxiv 2307.03172) shows 30% accuracy drop for info buried in long contexts. We adaptively split at 200K chars.</li>
+        <li><strong>Dual-call ensemble</strong> &mdash; Multiple papers (arxiv 2511.15714, 2504.18884) show 5-15% accuracy improvement from LLM ensembles. We exploit Gemini's MoE non-determinism.</li>
+        <li><strong>Temperature diversity</strong> &mdash; "Control the Temperature" (arxiv 2510.01218) shows temp 0 hurts recall. We run 0.0 + 0.15 concurrently.</li>
+        <li><strong>No schema duplication</strong> &mdash; Google's own docs state duplicating schema in prompt degrades output quality.</li>
+        <li><strong>Few-shot examples</strong> &mdash; MDPI 2025 reports 91.5% accuracy with few-shot prompt engineering vs lower without.</li>
+        <li><strong>Deterministic ranking</strong> &mdash; Eliminates 0.15-0.20 score variance from LLM non-determinism across runs.</li>
+      </ul>
+    </div>
+    <div class="col">
+      <h3>Competitive Advantages</h3>
+      <div style="font-size: 20px; color: #334155; line-height: 1.9; margin-bottom: 16px;">
+        <span class="tag-green tag">1</span> <strong>Only Rust solution</strong> &mdash; fastest cold start, lowest memory<br>
+        <span class="tag-green tag">2</span> <strong>Gemini 3.1 Flash Lite</strong> &mdash; first production use of newest model<br>
+        <span class="tag-green tag">3</span> <strong>PDF multimodal fallback</strong> &mdash; recovers OCR-invisible data<br>
+        <span class="tag-green tag">4</span> <strong>Cross-offer attribution</strong> &mdash; handles real-world data quality<br>
+        <span class="tag-green tag">5</span> <strong>Full observability</strong> &mdash; /analytics endpoint, per-request metrics<br>
+      </div>
+
+      <h3>Data Quality Finding</h3>
+      <div style="font-size: 18px; color: #334155; line-height: 1.7; margin-bottom: 16px;">
+        Identified and reported a training data error to organizers (lode segment: Pantaenius quotation PDF filed under Allianz). Our cross-offer attribution system detects and handles such cases automatically by scanning for insurer name frequency across offers.
+      </div>
+
+      <h3>What We'd Do With More Time</h3>
+      <div style="font-size: 18px; color: #64748b; line-height: 1.7;">
+        &bull; Post-extraction regex validation against source text<br>
+        &bull; PostgreSQL caching for repeated evaluations<br>
+        &bull; Iterative refinement (show model its first attempt)<br>
+        &bull; Field-targeted text snippet extraction
+      </div>
+    </div>
+  </div>
+  <div class="team-tag">Team Kilian | github.com/jiriem/hackathon-2026-team-kilian</div>
+  <div class="slide-number">3 / 3</div>
+</div>
+
+</body>
+</html>
