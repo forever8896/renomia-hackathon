@@ -7,7 +7,7 @@ use tracing::{error, warn};
 
 use crate::metrics::Metrics;
 
-const EXTRACT_MODEL: &str = "gemini-2.5-pro";
+const EXTRACT_MODEL: &str = "gemini-3.1-pro-preview";
 const MAX_RETRIES: u32 = 4;
 const MAX_PDF_SIZE: usize = 20_000_000; // 20MB limit for Gemini file upload
 
