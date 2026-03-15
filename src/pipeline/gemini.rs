@@ -396,7 +396,12 @@ CRITICAL RULES:
       - If only confirmed as covered without a specific sublimit → "Ano"
       - If excluded → "Vyloučeno" or "Vynecháno"
       - If not mentioned → "Neuvedeno"
-      Do NOT invent limits from the main policy limit — only use sublimit values explicitly stated for that specific coverage.
+      IMPORTANT: Always prefer SPECIFIC values over generic "Ano":
+      - "Objasnění podpojištění" → "15 % tolerance" not "Ano"
+      - "Dvě a více spoluúčastí" → "Jedna spoluúčast (nejvyšší)" not "Ano"
+      - "Regresní náhrady" → return the LIMIT (e.g. "CZK 25,000,000") not "Ano"
+      - "Výluky na kybernetická rizika" → "Vyloučeny" not "Ano"
+      - For any field: if the document specifies HOW/WHAT/HOW MUCH, return that detail, not just "Ano"
    j) Úrazové pojištění: if included for driver only, use "Ano (jen řidič)"
 3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort.
    For Allrisk packages: check the SPECIFIC offer document for what's included vs optional:
