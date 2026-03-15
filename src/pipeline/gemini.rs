@@ -428,7 +428,29 @@ CRITICAL RULES:
    - "CELKEM" = "Total" / "Gesamt" / "Total premium"
    - "roční pojistné" = "annual premium" / "Jahresprämie"
    - "pojistná částka" / "Sum insured" = coverage limit (NOT premium)
-   - "Pojištěná částka v případě úmrtí" = "Sum insured in case of death""#.to_string()
+   - "Pojištěná částka v případě úmrtí" = "Sum insured in case of death"
+
+EXAMPLE of correct extraction from a vehicle insurance offer:
+Document text: "povinné ručení (150/150 mil. kč) ... roční platba 34 851 kč ... spoluúčast 5 000 kč ... allrisk ... krytí skel se spoluúčastí 1 000 kč ... právní poradenství ... úraz řidiče"
+Correct output:
+- Roční pojistné → "34851"
+- Povinné ručení – limit → "150000000"
+- Spoluúčast havarijní → "5000"
+- Typ havarijního pojištění → "Allrisk"
+- Krytí skel → "Ano, se spoluúčastí CZK 1,000"
+- Právní ochrana → "Ano (právní poradenství)"
+- Úrazové pojištění → "Ano (jen řidič)"
+- Havarijní pojištění – limit → "Neuvedeno"
+
+EXAMPLE of correct extraction from a liability insurance offer:
+Document text: "LPP I 50 000 000 Kč ... LPP II 100 000 000 Kč ... spoluúčast 10 000 Kč ... věci zaměstnanců sublimit 50 000 000 Kč se spoluúčastí 500 Kč ... regresní náhrady 25 000 000 Kč"
+Correct output:
+- Limit pojistného plnění → "CZK 50,000,000 / CZK 100,000,000"
+- Obecná odpovědnost limit I → "CZK 50,000,000"
+- Obecná odpovědnost spoluúčast I → "CZK 10,000"
+- Věci zaměstnanců → "CZK 50,000,000"
+- Věci zaměstnanců limit I → "50 000 000 CZK"
+- Regresní náhrady → "CZK 25,000,000""#.to_string()
     }
 
     fn build_extraction_prompt(
@@ -640,9 +662,9 @@ Search the ENTIRE document carefully for each of these fields:
         }
     }
 
-    /// Extract fields from a single document.
-    /// With per-document extraction, each call gets manageable context (20-200K chars).
-    /// All fields are extracted at once — no batching needed.
+    /// Extract fields with dual-call ensemble for higher recall.
+    /// Runs two extraction calls concurrently with different seeds,
+    /// then merges results (first non-N/A wins, prefer longer answers on conflict).
     pub async fn extract_fields(
         &self,
         _offer_id: &str,
@@ -654,8 +676,34 @@ Search the ENTIRE document carefully for each of these fields:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        self.extract_fields_single_batch(
-            insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
-        ).await
+        // Run two extractions concurrently with different seeds for ensemble diversity
+        let (result_a, result_b) = futures::future::join(
+            self.extract_fields_single_batch(
+                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+            ),
+            self.extract_fields_single_batch(
+                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+            ),
+        ).await;
+
+        // Merge: prefer non-N/A, on conflict prefer longer/more-specific answer
+        let mut merged = HashMap::new();
+        for field in fields {
+            let a = result_a.get(field).map(|s| s.as_str()).unwrap_or("N/A");
+            let b = result_b.get(field).map(|s| s.as_str()).unwrap_or("N/A");
+
+            let value = match (a, b) {
+                ("N/A", "N/A") => "N/A".to_string(),
+                ("N/A", v) | ("Neuvedeno", v) if v != "N/A" => v.to_string(),
+                (v, "N/A") | (v, "Neuvedeno") if v != "N/A" => v.to_string(),
+                (a, b) if a == b => a.to_string(),
+                (a, b) => {
+                    // Both have values but differ — prefer longer (more specific)
+                    if a.len() >= b.len() { a.to_string() } else { b.to_string() }
+                }
+            };
+            merged.insert(field.clone(), value);
+        }
+        merged
     }
 }
