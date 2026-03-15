@@ -115,13 +115,20 @@ pub fn deterministic_rank(
         })
         .collect();
 
+    // For few fields (<=20): treat 1-2 win differences as ties, use premium
+    // For many fields (>20): use strict win count (coverage breadth matters more)
+    let use_premium_tiebreak = all_fields.len() <= 20;
+
     ranked.sort_by(|a, b| {
-        // Treat win counts within 2 as a tie — use premium as primary differentiator
-        let win_diff = (b.1 as i64) - (a.1 as i64);
-        if win_diff.abs() <= 2 {
-            // Close in wins — lower premium wins
-            a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| b.1.cmp(&a.1))
+        if use_premium_tiebreak {
+            let win_diff = (b.1 as i64) - (a.1 as i64);
+            if win_diff.abs() <= 2 {
+                a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| b.1.cmp(&a.1))
+            } else {
+                b.1.cmp(&a.1)
+                    .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+            }
         } else {
             b.1.cmp(&a.1)
                 .then_with(|| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
