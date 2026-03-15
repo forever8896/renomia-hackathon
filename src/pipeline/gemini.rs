@@ -360,7 +360,14 @@ impl GeminiClient {
         if fl.contains("vyloučen") {
             return "Concise summary of exclusions".to_string();
         }
-        "Text value, use Ano/Ne for boolean fields".to_string()
+        // For odpovědnost-style fields: when the field name refers to a coverage type
+        // (e.g. "Věci zaměstnanců", "Regresní náhrady", "Smluvní pokuty"),
+        // return the COVERAGE LIMIT as the value (e.g. "CZK 50,000,000"),
+        // or "Vyloučeno"/"Vynecháno" if not covered, not just "Ano"/"Ne"
+        if fl.contains("limit") || fl.contains("sublimit") {
+            return "Coverage limit value, e.g. 'CZK 50,000,000' or 'Vyloučeno'".to_string();
+        }
+        "If this is a coverage type, return the coverage limit/value (e.g. 'CZK 50,000,000'). If boolean, use Ano/Ne with qualifiers.".to_string()
     }
 
     fn extraction_system_instruction() -> String {
@@ -380,6 +387,11 @@ CRITICAL RULES:
    g) Do NOT add product variant names, marketing labels, or article references: "Allrisk" not "Allrisk (Varianta Max)", "Ano" not "Ano (dle RGL4)"
    h) When coverage is optional/add-on, ALWAYS include the price: "Ne (lze připojistit za CZK 1 485)" not just "Ne (lze připojistit)"
    i) Přímá likvidace: answer "Ano" or "Ne (lze připojistit)" — not brand names
+   k) For LIABILITY fields (odpovědnost segment): when a string field refers to a coverage type
+      (e.g. "Věci zaměstnanců", "Regresní náhrady", "Smluvní pokuty", "Krytí vadného výrobku"),
+      return the COVERAGE LIMIT as the answer (e.g. "CZK 50,000,000" or "50 000 000 Kč"),
+      NOT just "Ano". If the coverage is excluded, return "Vyloučeno" or "Vynecháno".
+      If it has two variants (I and II), return the specific variant's limit.
    j) Úrazové pojištění: if included for driver only, use "Ano (jen řidič)"
 3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort.
    For Allrisk packages: check the SPECIFIC offer document for what's included vs optional:
