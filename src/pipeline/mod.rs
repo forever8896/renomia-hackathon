@@ -167,43 +167,64 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             }
 
             async move {
-                // MAP: Extract from each document independently
-
                 // Sort: primary docs first, VPP last
                 let mut sorted_docs = primary_docs.clone();
                 sorted_docs.sort_by_key(|(_, _, is_vpp)| *is_vpp);
 
-                // Prepare labeled texts (owned, so futures can borrow them)
-                let labeled_docs: Vec<String> = sorted_docs.iter()
-                    .map(|(filename, text, _)| {
-                        let mut doc_text = text.clone();
-                        if doc_text.len() > MAX_DOC_CHARS {
-                            let end = floor_char_boundary(&doc_text, MAX_DOC_CHARS);
-                            doc_text.truncate(end);
-                        }
-                        format!("\n=== Document: {} ===\n{}", filename, doc_text)
-                    })
-                    .collect();
+                // Decide strategy based on total text size:
+                // - Small total (<200K): concatenate all docs for cross-reference context
+                // - Large total (>=200K): per-document extraction then merge (avoid lost-in-middle)
+                let total_text: usize = sorted_docs.iter().map(|(_, t, _)| t.len()).sum();
 
-                let doc_futures: Vec<_> = labeled_docs.iter()
-                    .map(|labeled| {
-                        gemini.extract_fields(
-                            &offer_id,
-                            &insurer,
-                            &segment,
-                            &fields,
-                            &field_types,
-                            labeled,
-                            rfp_text.as_deref(),
-                            &[], // no PDFs in map phase
-                        )
-                    })
-                    .collect();
+                let per_doc_results = if total_text < 200_000 {
+                    // CONCATENATED: all docs in one call — preserves cross-document context
+                    let mut combined = String::new();
+                    for (filename, text, _) in &sorted_docs {
+                        combined.push_str(&format!("\n=== Document: {} ===\n", filename));
+                        combined.push_str(text);
+                        combined.push('\n');
+                    }
+                    if combined.len() > MAX_DOC_CHARS {
+                        let end = floor_char_boundary(&combined, MAX_DOC_CHARS);
+                        combined.truncate(end);
+                    }
 
-                let per_doc_results = futures::future::join_all(doc_futures).await;
+                    let result = gemini.extract_fields(
+                        &offer_id, &insurer, &segment,
+                        &fields, &field_types,
+                        &combined, rfp_text.as_deref(), &[],
+                    ).await;
+                    vec![result]
+                } else {
+                    // MAP-REDUCE: extract from each doc independently, then merge
+                    // Avoids lost-in-middle for very long combined contexts
+                    info!("Per-doc extraction for {} ({} chars total, {} docs)", offer_id, total_text, sorted_docs.len());
+
+                    let labeled_docs: Vec<String> = sorted_docs.iter()
+                        .map(|(filename, text, _)| {
+                            let mut doc_text = text.clone();
+                            if doc_text.len() > MAX_DOC_CHARS {
+                                let end = floor_char_boundary(&doc_text, MAX_DOC_CHARS);
+                                doc_text.truncate(end);
+                            }
+                            format!("\n=== Document: {} ===\n{}", filename, doc_text)
+                        })
+                        .collect();
+
+                    let doc_futures: Vec<_> = labeled_docs.iter()
+                        .map(|labeled| {
+                            gemini.extract_fields(
+                                &offer_id, &insurer, &segment,
+                                &fields, &field_types,
+                                labeled, rfp_text.as_deref(), &[],
+                            )
+                        })
+                        .collect();
+
+                    futures::future::join_all(doc_futures).await
+                };
 
                 // REDUCE: Merge results — first non-N/A value wins
-                // Primary docs are processed first (sorted above), so they take priority
                 let mut merged: HashMap<String, String> = HashMap::new();
                 for field in &fields {
                     merged.insert(field.clone(), "N/A".to_string());
