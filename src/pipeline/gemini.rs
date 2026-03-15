@@ -367,7 +367,7 @@ impl GeminiClient {
         if fl.contains("limit") || fl.contains("sublimit") {
             return "Coverage limit value, e.g. 'CZK 50,000,000' or 'Vyloučeno'".to_string();
         }
-        "If this is a coverage type, return the coverage limit/value (e.g. 'CZK 50,000,000'). If boolean, use Ano/Ne with qualifiers.".to_string()
+        "Return what the document states: specific limit (CZK X) if stated, 'Ano'/'Ne' if only coverage status, with qualifiers when relevant.".to_string()
     }
 
     fn extraction_system_instruction() -> String {
@@ -389,9 +389,14 @@ CRITICAL RULES:
    i) Přímá likvidace: answer "Ano" or "Ne (lze připojistit)" — not brand names
    k) For LIABILITY fields (odpovědnost segment): when a string field refers to a coverage type
       (e.g. "Věci zaměstnanců", "Regresní náhrady", "Smluvní pokuty", "Krytí vadného výrobku"),
-      return the COVERAGE LIMIT as the answer (e.g. "CZK 50,000,000" or "50 000 000 Kč"),
-      NOT just "Ano". If the coverage is excluded, return "Vyloučeno" or "Vynecháno".
-      If it has two variants (I and II), return the specific variant's limit.
+      return what the document specifies:
+      - If a specific LIMIT is stated → return "CZK 50,000,000" or "50 000 000 Kč"
+      - If two limits (I/II) → return the specific variant
+      - If ranges → "CZK 50,000,000–100,000,000"
+      - If only confirmed as covered without a specific sublimit → "Ano"
+      - If excluded → "Vyloučeno" or "Vynecháno"
+      - If not mentioned → "Neuvedeno"
+      Do NOT invent limits from the main policy limit — only use sublimit values explicitly stated for that specific coverage.
    j) Úrazové pojištění: if included for driver only, use "Ano (jen řidič)"
 3. AVOID returning "N/A" — try harder. Look for synonyms, related terms, implied values. If a field is referenced but the value isn't stated, return "Neuvedeno". Only use "N/A" as absolute last resort.
    For Allrisk packages: check the SPECIFIC offer document for what's included vs optional:
@@ -688,31 +693,8 @@ Fields to extract:
             }
         }
 
-        // === Two-pass: re-extract N/A fields with a focused prompt ===
-        let na_fields: Vec<String> = all_results
-            .iter()
-            .filter(|(_, v)| v.as_str() == "N/A")
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        if !na_fields.is_empty() && na_fields.len() < fields.len() {
-            info!(
-                "Pass 2: re-extracting {} N/A fields for {} (out of {})",
-                na_fields.len(), offer_id, fields.len()
-            );
-
-            let retry_results = self.extract_fields_single_batch(
-                insurer, segment, &na_fields, field_types, documents_text, rfp_text, doc_uris,
-            ).await;
-
-            for (field, value) in retry_results {
-                if value != "N/A" {
-                    info!("Pass 2 recovered [{offer_id}] {field}: {value}");
-                    all_results.insert(field, value);
-                }
-            }
-        }
-
+        // N/A recovery is handled by the PDF fallback in mod.rs
+        // Retrying with the same OCR text rarely finds new values
         all_results
     }
 }
