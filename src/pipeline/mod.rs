@@ -339,18 +339,19 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     info!("Re-extracting {} fields for {} with {} PDFs",
                         na_fields.len(), offer_id, doc_uris.len());
 
+                    // PDF fallback also uses dual ensemble for better recall
                     let retry = gemini
                         .extract_fields(
                             &offer_id, &insurer, &segment,
                             &na_fields, &field_types,
-                            "", // no OCR text needed — PDFs have the content
+                            "", // no OCR text — PDFs have the content
                             None,
                             &doc_uris,
                         )
                         .await;
 
                     for (field, value) in retry {
-                        if value != "N/A" {
+                        if value != "N/A" && value != "Neuvedeno" {
                             info!("PDF recovered [{offer_id}] {field}: {value}");
                             fields_map.insert(field, value);
                         }
