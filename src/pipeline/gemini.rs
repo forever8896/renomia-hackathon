@@ -439,11 +439,10 @@ CRITICAL RULES:
         documents_text: &str,
         rfp_text: Option<&str>,
     ) -> String {
+        // NOTE: Don't list fields in the prompt — they're in responseSchema with descriptions.
+        // Google docs say duplicating schema in prompt degrades quality.
         let mut prompt = format!(
-            r#"TASK: Extract these fields from the insurance offer by "{insurer}" in the "{segment}" segment.
-
-Fields to extract:
-{fields_list}
+            r#"TASK: Extract the requested fields from this insurance offer by "{insurer}" in the "{segment}" segment. The fields to extract are specified in the response schema. Search the entire document carefully.
 
 {documents_text}"#
         );
@@ -637,11 +636,12 @@ Fields to extract:
         }
     }
 
-    /// Extract fields with automatic batching for large field lists,
-    /// PDF multimodal extraction, and two-pass N/A recovery.
+    /// Extract fields from a single document.
+    /// With per-document extraction, each call gets manageable context (20-200K chars).
+    /// All fields are extracted at once — no batching needed.
     pub async fn extract_fields(
         &self,
-        offer_id: &str,
+        _offer_id: &str,
         insurer: &str,
         segment: &str,
         fields: &[String],
@@ -650,57 +650,8 @@ Fields to extract:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        let mut all_results = HashMap::new();
-
-        if fields.len() <= BATCH_SIZE {
-            all_results = self.extract_fields_single_batch(
-                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
-            ).await;
-        } else {
-            let batches: Vec<&[String]> = fields.chunks(BATCH_SIZE).collect();
-            info!("Batching {} fields into {} chunks for {} — trying context cache", fields.len(), batches.len(), offer_id);
-
-            // Try to create a context cache for this document (saves re-sending 800K text per batch)
-            let cache_name = self.create_context_cache(documents_text, doc_uris).await.ok();
-            if let Some(ref name) = cache_name {
-                info!("Created context cache for {}: {}", offer_id, name);
-            }
-
-            if let Some(ref cache_name) = cache_name {
-                // Use cached context — only send the field-specific prompt per batch
-                let batch_futures: Vec<_> = batches
-                    .iter()
-                    .map(|batch| {
-                        self.extract_fields_cached(
-                            cache_name, insurer, segment, batch, field_types,
-                        )
-                    })
-                    .collect();
-
-                let batch_results = futures::future::join_all(batch_futures).await;
-                for result in batch_results {
-                    all_results.extend(result);
-                }
-            } else {
-                // Fallback: send full document per batch (no cache)
-                let batch_futures: Vec<_> = batches
-                    .iter()
-                    .map(|batch| {
-                        self.extract_fields_single_batch(
-                            insurer, segment, batch, field_types, documents_text, rfp_text, doc_uris,
-                        )
-                    })
-                    .collect();
-
-                let batch_results = futures::future::join_all(batch_futures).await;
-                for result in batch_results {
-                    all_results.extend(result);
-                }
-            }
-        }
-
-        // N/A recovery is handled by the PDF fallback in mod.rs
-        // Retrying with the same OCR text rarely finds new values
-        all_results
+        self.extract_fields_single_batch(
+            insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+        ).await
     }
 }

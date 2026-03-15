@@ -10,24 +10,9 @@ use crate::models::{OfferParsed, SolveRequest, SolveResponse};
 use gemini::GeminiClient;
 use normalizer::{is_vpp_document, normalize_ocr};
 
-const MAX_OCR_CHARS: usize = 800_000;
-/// Hard deadline for the entire solve — leave margin for ranking call
+const MAX_DOC_CHARS: usize = 200_000;
+/// Hard deadline for the entire solve — leave margin for ranking
 const SOLVE_DEADLINE_SECS: u64 = 250;
-
-fn mime_from_filename(filename: &str) -> String {
-    let lower = filename.to_lowercase();
-    if lower.ends_with(".pdf") {
-        "application/pdf".to_string()
-    } else if lower.ends_with(".docx") {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string()
-    } else if lower.ends_with(".doc") {
-        "application/msword".to_string()
-    } else if lower.ends_with(".xlsx") {
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet".to_string()
-    } else {
-        "application/octet-stream".to_string()
-    }
-}
 
 /// Find the largest index <= `pos` that is a valid char boundary.
 fn floor_char_boundary(s: &str, pos: usize) -> usize {
@@ -59,26 +44,22 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     });
 
     // === Cross-offer document attribution ===
-    // Build an index: for each insurer name, find documents from OTHER offers
-    // that mention this insurer prominently (broker/underwriter mismatch detection)
-    let mut cross_ref_docs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // dest_offer_id -> [(filename, normalized_text)]
-    let mut cross_ref_pdfs: HashMap<String, Vec<(String, String)>> = HashMap::new(); // dest_offer_id -> [(url, mime)]
-    let mut reassigned_docs: HashMap<String, Vec<String>> = HashMap::new(); // source_offer_id -> [filenames moved away]
-
-    // Only cross-reference for offers that have very little own content
     let sparse_offers: Vec<String> = request.offers.iter()
         .filter(|o| {
             let own_text: usize = o.documents.iter()
                 .filter(|d| !is_vpp_document(&d.filename))
                 .map(|d| d.ocr_text.len())
                 .sum();
-            own_text < 15_000 // sparse = less than 15K chars of primary docs
+            own_text < 15_000
         })
         .map(|o| o.id.clone())
         .collect();
 
+    let mut cross_ref_docs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut cross_ref_pdfs: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut reassigned_docs: HashMap<String, Vec<String>> = HashMap::new();
+
     for offer in &request.offers {
-        // Only cross-reference for sparse offers
         if !sparse_offers.contains(&offer.id) {
             continue;
         }
@@ -92,7 +73,6 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     continue;
                 }
                 let text_lower = doc.ocr_text.to_lowercase();
-                // Count mentions — needs very high count to avoid false positives
                 let mention_count = text_lower.matches(&offer_insurer_lower).count();
                 if mention_count >= 15 {
                     info!(
@@ -104,13 +84,11 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                         .entry(offer.id.clone())
                         .or_default()
                         .push((doc.filename.clone(), normalized));
-                    // Track that this doc was moved away from the source offer
                     reassigned_docs
                         .entry(other_offer.id.clone())
                         .or_default()
                         .push(doc.filename.clone());
 
-                    // Also grab the PDF URL if it's a .pdf
                     if doc.filename.to_lowercase().ends_with(".pdf") {
                         if let Some(url) = &doc.pdf_url {
                             if !url.is_empty() {
@@ -126,7 +104,10 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
         }
     }
 
-    // === Pass 1: Extract from OCR text (parallel across offers) ===
+    // === Per-document extraction (Map phase) ===
+    // Instead of concatenating all docs into one 800K blob,
+    // extract from each document independently then merge.
+    // This avoids "lost in the middle" for long contexts.
     let extraction_futures: Vec<_> = request
         .offers
         .iter()
@@ -138,14 +119,38 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
             let field_types = field_types.clone();
             let rfp_text = rfp_text.clone();
 
-            // Get list of docs that were reassigned AWAY from this offer
             let moved_away: Vec<String> = reassigned_docs
                 .get(&offer_id)
                 .cloned()
                 .unwrap_or_default();
 
-            // Collect PDF URLs: own docs (minus reassigned) + cross-referenced docs
-            let mut doc_urls: Vec<(String, String)> = offer
+            // Collect all documents: own (minus reassigned) + cross-referenced
+            let mut primary_docs: Vec<(String, String, bool)> = Vec::new(); // (filename, text, is_vpp)
+            for doc in &offer.documents {
+                if doc.ocr_text.is_empty() {
+                    continue;
+                }
+                if moved_away.contains(&doc.filename) {
+                    info!("Skipping reassigned doc '{}' from offer {}", doc.filename, offer_id);
+                    continue;
+                }
+                let normalized = normalize_ocr(&doc.ocr_text);
+                if normalized.is_empty() {
+                    continue;
+                }
+                let is_vpp = is_vpp_document(&doc.filename);
+                primary_docs.push((doc.filename.clone(), normalized, is_vpp));
+            }
+
+            // Add cross-referenced docs
+            if let Some(xref_docs) = cross_ref_docs.get(&offer_id) {
+                for (filename, text) in xref_docs {
+                    primary_docs.push((format!("[Cross-ref] {}", filename), text.clone(), false));
+                }
+            }
+
+            // Collect PDF URLs for fallback
+            let mut pdf_urls: Vec<(String, String)> = offer
                 .documents
                 .iter()
                 .filter(|doc| !is_vpp_document(&doc.filename))
@@ -157,130 +162,96 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                     Some((url, "application/pdf".to_string()))
                 })
                 .collect();
-            // Add cross-referenced PDFs
             if let Some(xref_pdfs) = cross_ref_pdfs.get(&offer_id) {
-                doc_urls.extend(xref_pdfs.clone());
-            }
-
-            // Build OCR text: primary docs + cross-referenced docs + VPP if room
-            let mut primary_docs = Vec::new();
-            let mut vpp_docs = Vec::new();
-
-            for doc in &offer.documents {
-                if doc.ocr_text.is_empty() {
-                    continue;
-                }
-                // Skip docs that were reassigned to another offer
-                if moved_away.contains(&doc.filename) {
-                    info!("Skipping reassigned doc '{}' from offer {}", doc.filename, offer_id);
-                    continue;
-                }
-                let normalized = normalize_ocr(&doc.ocr_text);
-                if normalized.is_empty() {
-                    continue;
-                }
-                if is_vpp_document(&doc.filename) {
-                    vpp_docs.push((doc.filename.clone(), normalized));
-                } else {
-                    primary_docs.push((doc.filename.clone(), normalized));
-                }
-            }
-
-            // Add cross-referenced docs as primary
-            if let Some(xref_docs) = cross_ref_docs.get(&offer_id) {
-                for (filename, text) in xref_docs {
-                    primary_docs.push((
-                        format!("[Cross-ref] {}", filename),
-                        text.clone(),
-                    ));
-                }
-            }
-
-            let mut doc_text = String::new();
-            for (filename, text) in &primary_docs {
-                doc_text.push_str(&format!("\n=== Document: {} ===\n", filename));
-                doc_text.push_str(text);
-                doc_text.push('\n');
-            }
-
-            // Include VPP docs if there's room
-            for (filename, text) in &vpp_docs {
-                let budget = MAX_OCR_CHARS.saturating_sub(doc_text.len());
-                if budget < 2000 {
-                    break;
-                }
-                info!(
-                    "Including VPP doc {} for offer {} ({} chars, budget {})",
-                    filename, offer_id, text.len(), budget
-                );
-                doc_text.push_str(&format!(
-                    "\n=== Supplementary Document (General Terms): {} ===\n",
-                    filename
-                ));
-                if text.len() > budget {
-                    let end = floor_char_boundary(text, budget);
-                    doc_text.push_str(&text[..end]);
-                } else {
-                    doc_text.push_str(text);
-                }
-                doc_text.push('\n');
-            }
-
-            if doc_text.len() > MAX_OCR_CHARS {
-                warn!(
-                    "Truncating OCR for offer {} from {} to {} chars",
-                    offer_id,
-                    doc_text.len(),
-                    MAX_OCR_CHARS
-                );
-                let end = floor_char_boundary(&doc_text, MAX_OCR_CHARS);
-                doc_text.truncate(end);
+                pdf_urls.extend(xref_pdfs.clone());
             }
 
             async move {
-                // Pass 1: OCR-only extraction (no PDFs)
-                let extracted = gemini
-                    .extract_fields(
-                        &offer_id,
-                        &insurer,
-                        &segment,
-                        &fields,
-                        &field_types,
-                        &doc_text,
-                        rfp_text.as_deref(),
-                        &[], // no PDFs in pass 1
-                    )
-                    .await;
+                // MAP: Extract from each document independently
 
-                (offer_id, insurer, extracted, doc_urls, doc_text, rfp_text)
+                // Sort: primary docs first, VPP last
+                let mut sorted_docs = primary_docs.clone();
+                sorted_docs.sort_by_key(|(_, _, is_vpp)| *is_vpp);
+
+                // Prepare labeled texts (owned, so futures can borrow them)
+                let labeled_docs: Vec<String> = sorted_docs.iter()
+                    .map(|(filename, text, _)| {
+                        let mut doc_text = text.clone();
+                        if doc_text.len() > MAX_DOC_CHARS {
+                            let end = floor_char_boundary(&doc_text, MAX_DOC_CHARS);
+                            doc_text.truncate(end);
+                        }
+                        format!("\n=== Document: {} ===\n{}", filename, doc_text)
+                    })
+                    .collect();
+
+                let doc_futures: Vec<_> = labeled_docs.iter()
+                    .map(|labeled| {
+                        gemini.extract_fields(
+                            &offer_id,
+                            &insurer,
+                            &segment,
+                            &fields,
+                            &field_types,
+                            labeled,
+                            rfp_text.as_deref(),
+                            &[], // no PDFs in map phase
+                        )
+                    })
+                    .collect();
+
+                let per_doc_results = futures::future::join_all(doc_futures).await;
+
+                // REDUCE: Merge results — first non-N/A value wins
+                // Primary docs are processed first (sorted above), so they take priority
+                let mut merged: HashMap<String, String> = HashMap::new();
+                for field in &fields {
+                    merged.insert(field.clone(), "N/A".to_string());
+                }
+
+                for doc_result in &per_doc_results {
+                    for (field, value) in doc_result {
+                        if value != "N/A" && value != "Neuvedeno" {
+                            let current = merged.get(field).map(|s| s.as_str()).unwrap_or("N/A");
+                            if current == "N/A" || current == "Neuvedeno" {
+                                merged.insert(field.clone(), value.clone());
+                            }
+                        } else if value == "Neuvedeno" {
+                            let current = merged.get(field).map(|s| s.as_str()).unwrap_or("N/A");
+                            if current == "N/A" {
+                                merged.insert(field.clone(), value.clone());
+                            }
+                        }
+                    }
+                }
+
+                (offer_id, insurer, merged, pdf_urls)
             }
         })
         .collect();
 
     let pass1_results = futures::future::join_all(extraction_futures).await;
 
-    // === Pass 2: PDF fallback for offers with N/A fields ===
-    let mut final_results: Vec<(String, String, HashMap<String, String>)> = Vec::new();
-
+    // === PDF fallback for remaining N/A fields ===
     let elapsed = start_time.elapsed().as_secs();
     let time_remaining = SOLVE_DEADLINE_SECS.saturating_sub(elapsed);
     let skip_pdf = time_remaining < 60;
 
     if skip_pdf {
-        warn!("Skipping PDF fallback — only {}s remaining (need 60s)", time_remaining);
+        warn!("Skipping PDF fallback — only {}s remaining", time_remaining);
     }
 
-    // Collect offers that need PDF fallback
+    let mut final_results: Vec<(String, String, HashMap<String, String>)> = Vec::new();
     let mut pdf_tasks = Vec::new();
     let mut no_pdf_results = Vec::new();
 
-    for (offer_id, insurer, fields_map, doc_urls, doc_text, rfp_text) in pass1_results {
+    for (offer_id, insurer, fields_map, pdf_urls) in pass1_results {
         let missing_count = fields_map
             .values()
             .filter(|v| matches!(v.as_str(), "N/A" | "Neuvedeno"))
             .count();
 
-        if missing_count > 0 && !doc_urls.is_empty() && !skip_pdf {
+        if missing_count > 0 && !pdf_urls.is_empty() && !skip_pdf {
             let na_fields: Vec<String> = fields_map
                 .iter()
                 .filter(|(_, v)| matches!(v.as_str(), "N/A" | "Neuvedeno"))
@@ -288,11 +259,11 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
                 .collect();
 
             info!(
-                "Pass 2 (PDF): {} N/A fields for {} — downloading {} PDFs",
-                missing_count, offer_id, doc_urls.len()
+                "PDF fallback: {} missing fields for {} — downloading {} PDFs",
+                missing_count, offer_id, pdf_urls.len()
             );
 
-            pdf_tasks.push((offer_id, insurer, fields_map, doc_urls, na_fields, doc_text, rfp_text));
+            pdf_tasks.push((offer_id, insurer, fields_map, pdf_urls, na_fields));
         } else {
             no_pdf_results.push((offer_id, insurer, fields_map));
         }
@@ -301,68 +272,51 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
     // Process PDF fallbacks in parallel
     let pdf_futures: Vec<_> = pdf_tasks
         .into_iter()
-        .map(|(offer_id, insurer, mut fields_map, doc_urls, na_fields, doc_text, rfp_text)| {
+        .map(|(offer_id, insurer, mut fields_map, pdf_urls, na_fields)| {
             async move {
-                // Download all documents in parallel
-                let download_futures: Vec<_> = doc_urls
+                let download_futures: Vec<_> = pdf_urls
                     .iter()
                     .map(|(url, _mime)| gemini.download_pdf(url))
                     .collect();
                 let downloads = futures::future::join_all(download_futures).await;
 
-                // Collect successful downloads with their MIME types
                 let mut doc_bytes: Vec<(Vec<u8>, String)> = Vec::new();
-                for (result, (url, mime)) in downloads.into_iter().zip(doc_urls.iter()) {
+                for (result, (url, mime)) in downloads.into_iter().zip(pdf_urls.iter()) {
                     match result {
                         Ok(bytes) => {
-                            info!(
-                                "Downloaded doc for {}: {} ({} bytes, {})",
-                                offer_id,
-                                url.split('/').last().unwrap_or("?"),
-                                bytes.len(),
-                                mime
-                            );
+                            info!("Downloaded PDF for {}: {} ({} bytes)",
+                                offer_id, url.split('/').last().unwrap_or("?"), bytes.len());
                             doc_bytes.push((bytes, mime.clone()));
                         }
                         Err(e) => warn!("Failed to download {}: {}", url, e),
                     }
                 }
 
-                // Upload all in parallel
                 let upload_futures: Vec<_> = doc_bytes
                     .iter()
                     .map(|(bytes, mime)| gemini.upload_document(bytes, mime))
                     .collect();
                 let uploads = futures::future::join_all(upload_futures).await;
 
-                // Collect URIs with their MIME types
                 let doc_uris: Vec<(String, String)> = uploads
                     .into_iter()
                     .zip(doc_bytes.iter().map(|(_, mime)| mime.clone()))
                     .filter_map(|(r, mime)| match r {
                         Ok(uri) => Some((uri, mime)),
-                        Err(e) => {
-                            warn!("Failed to upload document: {}", e);
-                            None
-                        }
+                        Err(e) => { warn!("Failed to upload: {}", e); None }
                     })
                     .collect();
 
                 if !doc_uris.is_empty() {
-                    info!(
-                        "Re-extracting {} N/A fields for {} with {} PDFs",
-                        na_fields.len(), offer_id, doc_uris.len()
-                    );
+                    info!("Re-extracting {} fields for {} with {} PDFs",
+                        na_fields.len(), offer_id, doc_uris.len());
 
                     let retry = gemini
                         .extract_fields(
-                            &offer_id,
-                            &insurer,
-                            &segment,
-                            &na_fields,
-                            &field_types,
-                            &doc_text,
-                            rfp_text.as_deref(),
+                            &offer_id, &insurer, &segment,
+                            &na_fields, &field_types,
+                            "", // no OCR text needed — PDFs have the content
+                            None,
                             &doc_uris,
                         )
                         .await;
@@ -382,7 +336,6 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
 
     let pdf_results = futures::future::join_all(pdf_futures).await;
 
-    // Combine all results
     final_results.extend(no_pdf_results);
     final_results.extend(pdf_results);
 
@@ -405,7 +358,7 @@ pub async fn solve(request: SolveRequest, gemini: &GeminiClient) -> SolveRespons
         ranking_input.push((id.clone(), insurer.clone(), fields_map.clone()));
     }
 
-    // Rank offers deterministically (no LLM call needed)
+    // Deterministic ranking
     let ranking = ranker::deterministic_rank(&ranking_input, field_types);
     info!("Deterministic ranking result: {:?}", ranking);
 
