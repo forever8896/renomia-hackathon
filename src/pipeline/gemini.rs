@@ -434,14 +434,17 @@ CRITICAL RULES:
     fn build_extraction_prompt(
         insurer: &str,
         segment: &str,
-        _fields_list: &str,
+        fields_list: &str,
         documents_text: &str,
         rfp_text: Option<&str>,
     ) -> String {
-        // NOTE: Don't list fields in the prompt — they're in responseSchema with descriptions.
-        // Google docs say duplicating schema in prompt degrades quality.
+        // List field names in prompt as a search checklist (not the schema structure).
+        // The schema handles format; the prompt tells the model WHAT to search for.
         let mut prompt = format!(
-            r#"TASK: Extract the requested fields from this insurance offer by "{insurer}" in the "{segment}" segment. The fields to extract are specified in the response schema. Search the entire document carefully.
+            r#"TASK: Extract the requested fields from this insurance offer by "{insurer}" in the "{segment}" segment.
+
+Search the ENTIRE document carefully for each of these fields:
+{fields_list}
 
 {documents_text}"#
         );
