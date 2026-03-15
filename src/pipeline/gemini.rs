@@ -509,6 +509,7 @@ Search the ENTIRE document carefully for each of these fields:
     async fn extract_fields_single_batch(
         &self,
         model: &str,
+        temperature: f64,
         insurer: &str,
         segment: &str,
         fields: &[String],
@@ -558,7 +559,7 @@ Search the ENTIRE document carefully for each of these fields:
         let generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
-            "temperature": 0.0,
+            "temperature": temperature,
             "topP": 1.0,
             "seed": 42,
             "thinkingConfig": {"thinkingBudget": thinking_budget},
@@ -678,13 +679,13 @@ Search the ENTIRE document carefully for each of these fields:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        // Dual-call ensemble: same model, MoE variance provides natural diversity
+        // Dual-call ensemble: temperature diversity for better recall
         let (result_a, result_b) = futures::future::join(
             self.extract_fields_single_batch(
-                EXTRACT_MODEL_A, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+                EXTRACT_MODEL_A, 0.0, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
             ),
             self.extract_fields_single_batch(
-                EXTRACT_MODEL_A, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+                EXTRACT_MODEL_A, 0.15, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
             ),
         ).await;
 
