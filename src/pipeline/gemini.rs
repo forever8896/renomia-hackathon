@@ -676,9 +676,42 @@ Search the ENTIRE document carefully for each of these fields:
         }
     }
 
+    /// Group fields semantically for focused extraction.
+    /// Returns groups of related fields that the model can extract together.
+    fn semantic_groups(fields: &[String]) -> Vec<Vec<String>> {
+        let mut limits = Vec::new();
+        let mut deductibles = Vec::new();
+        let mut coverage = Vec::new();
+        let mut other = Vec::new();
+
+        for f in fields {
+            let fl = f.to_lowercase();
+            if fl.contains("limit") || fl.contains("částk") || fl.contains("sublimit")
+                || fl.contains("použití zvýšených") {
+                limits.push(f.clone());
+            } else if fl.contains("spoluúčast") || fl.contains("dvě a více") {
+                deductibles.push(f.clone());
+            } else if fl.contains("krytí") || fl.contains("regres") || fl.contains("věci")
+                || fl.contains("osoby") || fl.contains("odpovědnost") && !fl.contains("limit")
+                || fl.contains("smluvní") || fl.contains("křížov") && !fl.contains("limit")
+                    && !fl.contains("spoluúčast")
+                || fl.contains("subdodavatel") {
+                coverage.push(f.clone());
+            } else {
+                other.push(f.clone());
+            }
+        }
+
+        let mut groups = Vec::new();
+        if !limits.is_empty() { groups.push(limits); }
+        if !deductibles.is_empty() { groups.push(deductibles); }
+        if !coverage.is_empty() { groups.push(coverage); }
+        if !other.is_empty() { groups.push(other); }
+        groups
+    }
+
     /// Extract fields with dual-call ensemble for higher recall.
-    /// Runs two extraction calls concurrently with different seeds,
-    /// then merges results (first non-N/A wins, prefer longer answers on conflict).
+    /// For large field sets (>30), uses semantic grouping for focused extraction.
     pub async fn extract_fields(
         &self,
         _offer_id: &str,
@@ -690,7 +723,37 @@ Search the ENTIRE document carefully for each of these fields:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        // Dual-call ensemble with temperature diversity
+        // For large field sets, use semantic grouping
+        if fields.len() > 30 {
+            let groups = Self::semantic_groups(fields);
+            warn!("Semantic grouping: {} fields → {} groups ({} fields each)",
+                fields.len(), groups.len(),
+                groups.iter().map(|g| g.len().to_string()).collect::<Vec<_>>().join(", "));
+
+            // Extract each group with ensemble — all groups run concurrently
+            let group_futures: Vec<_> = groups.iter()
+                .map(|group| async {
+                    let (ra, rb) = futures::future::join(
+                        self.extract_fields_single_batch(
+                            EXTRACT_MODEL_A, 0.0, insurer, segment, group, field_types, documents_text, rfp_text, doc_uris,
+                        ),
+                        self.extract_fields_single_batch(
+                            EXTRACT_MODEL_A, 0.15, insurer, segment, group, field_types, documents_text, rfp_text, doc_uris,
+                        ),
+                    ).await;
+                    Self::merge_results(group, &ra, &rb)
+                })
+                .collect();
+
+            let group_results = futures::future::join_all(group_futures).await;
+            let mut all = HashMap::new();
+            for result in group_results {
+                all.extend(result);
+            }
+            return all;
+        }
+
+        // For small field sets, dual-call ensemble on all fields
         let (result_a, result_b) = futures::future::join(
             self.extract_fields_single_batch(
                 EXTRACT_MODEL_A, 0.0, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
@@ -700,7 +763,14 @@ Search the ENTIRE document carefully for each of these fields:
             ),
         ).await;
 
-        // Merge: prefer non-N/A, on conflict prefer longer/more-specific answer
+        Self::merge_results(fields, &result_a, &result_b)
+    }
+
+    fn merge_results(
+        fields: &[String],
+        result_a: &HashMap<String, String>,
+        result_b: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
         let mut merged = HashMap::new();
         for field in fields {
             let a = result_a.get(field).map(|s| s.as_str()).unwrap_or("N/A");
@@ -712,7 +782,6 @@ Search the ENTIRE document carefully for each of these fields:
                 (v, "N/A") | (v, "Neuvedeno") if v != "N/A" => v.to_string(),
                 (a, b) if a == b => a.to_string(),
                 (a, b) => {
-                    // Both have values but differ — prefer longer (more specific)
                     if a.len() >= b.len() { a.to_string() } else { b.to_string() }
                 }
             };
