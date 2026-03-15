@@ -610,12 +610,12 @@ Fields to extract:
             "propertyOrdering": property_ordering,
         });
 
-        // Cached calls are for large docs (odpovědnost) — use higher thinking budget
+        // Cached calls are for large docs — balance accuracy vs time
         let generation_config = json!({
             "responseMimeType": "application/json",
             "responseSchema": response_schema,
             "temperature": 0.0,
-            "thinkingConfig": {"thinkingBudget": 8192},
+            "thinkingConfig": {"thinkingBudget": 4096},
         });
 
         let contents = json!([{"parts": [{"text": prompt}]}]);
