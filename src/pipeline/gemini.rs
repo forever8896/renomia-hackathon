@@ -8,7 +8,7 @@ use tracing::{error, warn};
 use crate::metrics::Metrics;
 
 const EXTRACT_MODEL_A: &str = "gemini-3.1-flash-lite-preview";
-const EXTRACT_MODEL_B: &str = "gemini-3.1-pro-preview";  // Stronger model for ensemble diversity
+const EXTRACT_MODEL_B: &str = "gemini-3-flash-preview";  // Stronger Flash for ensemble diversity
 const MAX_RETRIES: u32 = 4;
 const MAX_PDF_SIZE: usize = 20_000_000; // 20MB limit for Gemini file upload
 
@@ -679,7 +679,7 @@ Search the ENTIRE document carefully for each of these fields:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        // Dual-call ensemble: temperature diversity for better recall
+        // Dual-call ensemble with temperature diversity
         let (result_a, result_b) = futures::future::join(
             self.extract_fields_single_batch(
                 EXTRACT_MODEL_A, 0.0, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
