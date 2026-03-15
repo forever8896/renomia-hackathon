@@ -7,7 +7,8 @@ use tracing::{error, warn};
 
 use crate::metrics::Metrics;
 
-const EXTRACT_MODEL: &str = "gemini-3.1-flash-lite-preview";
+const EXTRACT_MODEL_A: &str = "gemini-3.1-flash-lite-preview";
+const EXTRACT_MODEL_B: &str = "gemini-3.1-pro-preview";  // Stronger model for ensemble diversity
 const MAX_RETRIES: u32 = 4;
 const MAX_PDF_SIZE: usize = 20_000_000; // 20MB limit for Gemini file upload
 
@@ -159,7 +160,7 @@ impl GeminiClient {
         parts.push(json!({"text": documents_text}));
 
         let body = json!({
-            "model": format!("models/{}", EXTRACT_MODEL),
+            "model": format!("models/{}",EXTRACT_MODEL_A),
             "contents": [{"role": "user", "parts": parts}],
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "ttl": "600s"
@@ -195,7 +196,7 @@ impl GeminiClient {
     ) -> Result<Value, String> {
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            EXTRACT_MODEL, self.api_key
+            EXTRACT_MODEL_A, self.api_key
         );
 
         let body = json!({
@@ -507,13 +508,14 @@ Search the ENTIRE document carefully for each of these fields:
 
     async fn extract_fields_single_batch(
         &self,
+        model: &str,
         insurer: &str,
         segment: &str,
         fields: &[String],
         field_types: &HashMap<String, String>,
         documents_text: &str,
         rfp_text: Option<&str>,
-        doc_uris: &[(String, String)], // Gemini file URIs for uploaded PDFs
+        doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
         let fields_list: String = fields
             .iter()
@@ -573,7 +575,7 @@ Search the ENTIRE document carefully for each of these fields:
 
         let system_instruction = Self::extraction_system_instruction();
 
-        match self.call_gemini(EXTRACT_MODEL, contents, generation_config, Some(&system_instruction)).await {
+        match self.call_gemini(model, contents, generation_config, Some(&system_instruction)).await {
             Ok(parsed) => {
                 match Self::extract_text_from_response(&parsed) {
                     Ok(text) => Self::parse_extraction_response(&text, fields),
@@ -676,13 +678,13 @@ Search the ENTIRE document carefully for each of these fields:
         rfp_text: Option<&str>,
         doc_uris: &[(String, String)],
     ) -> HashMap<String, String> {
-        // Run two extractions concurrently with different seeds for ensemble diversity
+        // Dual-call ensemble: same model, MoE variance provides natural diversity
         let (result_a, result_b) = futures::future::join(
             self.extract_fields_single_batch(
-                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+                EXTRACT_MODEL_A, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
             ),
             self.extract_fields_single_batch(
-                insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
+                EXTRACT_MODEL_A, insurer, segment, fields, field_types, documents_text, rfp_text, doc_uris,
             ),
         ).await;
 
